@@ -91,6 +91,8 @@ try
                     hostOnline = runner.HostOnline,
                     unsent = outbox.CountUnsent(), bdSeq = connection.BirthDeathSequence,
                     lastPublished = runner.LastPublished,
+                    // Which broker settings are in use, where they came from, any trial or rejection, certificate expiry.
+                    broker = runner.BrokerState,
                     config = new { version = acquisition.ConfigState.Version, reachable = acquisition.ConfigState.Reachable },
                     devices = acquisition.Statuses()
                 }, IoT.Contracts.EdgeTopics.Json);

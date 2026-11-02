@@ -15,11 +15,16 @@ public sealed record WireMessage(long Id, DateTimeOffset At, string Topic, strin
 
 // The console's Sparkplug consumer on Mosquitto, alongside MQTTX. It uses a persistent session with QoS 1,
 // so the broker keeps its messages while it is disconnected, and feeds both the message feed and the view.
-public sealed class WireMonitor(IConfiguration configuration, SparkplugView view, ILogger<WireMonitor> logger) : BackgroundService
+public sealed class WireMonitor(IConfiguration configuration, SparkplugView view, ComponentManager components,
+    ILogger<WireMonitor> logger) : BackgroundService
 {
     private readonly Dictionary<string, LinkedList<WireMessage>> _messages = new() { ["upstream"] = new() };
     private readonly Dictionary<string, bool> _connected = new() { ["upstream"] = false };
+    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(10) };
     private long _nextId;
+    private BrokerTarget? _gatewayBroker;
+
+    private sealed record BrokerTarget(string Host, int Port, bool UseTls, string? CertificateLocation, string? CertificateSha256);
 
     public WireMessage[] Recent(string broker, int count = 120)
     {
@@ -31,30 +36,51 @@ public sealed class WireMonitor(IConfiguration configuration, SparkplugView view
         lock (_messages) return _connected[broker];
     }
 
-    protected override Task ExecuteAsync(CancellationToken stoppingToken)
+    protected override Task ExecuteAsync(CancellationToken stoppingToken) => WatchAsync("upstream", "spBv1.0/#", stoppingToken);
+
+    // Watch the broker the gateway publishes to, so the view stays right through a registry switch or rollback.
+    // Only a broker the gateway is online with counts: trial attempts that fail are not followed.
+    // Before the gateway has reported one, use this console's appsettings.
+    private BrokerTarget CurrentTarget()
     {
+        if (components.ReadGatewayStatus() is { } status
+            && status.TryGetProperty("upstream", out var upstream) && upstream.GetString() == "Online"
+            && status.TryGetProperty("broker", out var broker)
+            && broker.ValueKind == System.Text.Json.JsonValueKind.Object && broker.TryGetProperty("active", out var active)
+            && active.ValueKind == System.Text.Json.JsonValueKind.Object)
+        {
+            string? Text(string name) => active.TryGetProperty(name, out var value) && value.ValueKind == System.Text.Json.JsonValueKind.String ? value.GetString() : null;
+            _gatewayBroker = new(Text("host") ?? "127.0.0.1", active.GetProperty("port").GetInt32(), active.GetProperty("useTls").GetBoolean(),
+                Text("certificateLocation"), Text("certificateSha256"));
+        }
+        if (_gatewayBroker is not null) return _gatewayBroker;
         var mqtt = configuration.GetSection("Mqtt");
-        var useTls = mqtt.GetValue("UseTls", true);
-        var certificatePath = Path.Combine(AppContext.BaseDirectory, mqtt["BrokerCertificatePath"] ?? "certs/broker.crt");
-        return WatchAsync("upstream", mqtt["Host"] ?? "127.0.0.1", mqtt.GetValue("Port", 8883),
-            useTls && File.Exists(certificatePath) ? certificatePath : null, "spBv1.0/#", stoppingToken);
+        return new(mqtt["Host"] ?? "127.0.0.1", mqtt.GetValue("Port", 8883), mqtt.GetValue("UseTls", true),
+            mqtt["BrokerCertificatePath"] ?? "certs/broker.crt", null);
     }
 
-    private async Task WatchAsync(string broker, string host, int port, string? certificatePath, string filter,
-        CancellationToken stoppingToken)
+    // A file path is resolved next to this console (it ships the same certs folder); a URL is downloaded and pinned.
+    private static async Task<X509Certificate2?> LoadCertificateAsync(BrokerTarget target, CancellationToken cancellationToken)
+    {
+        if (!target.UseTls || target.CertificateLocation is null) return null;
+        var text = Uri.TryCreate(target.CertificateLocation, UriKind.Absolute, out var uri) && !uri.IsFile
+            ? Encoding.ASCII.GetString(await Http.GetByteArrayAsync(uri, cancellationToken))
+            : await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, target.CertificateLocation), cancellationToken);
+        var certificate = X509Certificate2.CreateFromPem(text);
+        var fingerprint = Convert.ToHexString(certificate.GetCertHash(System.Security.Cryptography.HashAlgorithmName.SHA256));
+        if (target.CertificateSha256 is { } pinned && !fingerprint.Equals(pinned, StringComparison.OrdinalIgnoreCase))
+        {
+            certificate.Dispose();
+            throw new InvalidOperationException($"Certificate {target.CertificateLocation} does not match its pinned fingerprint.");
+        }
+        return certificate;
+    }
+
+    private async Task WatchAsync(string broker, string filter, CancellationToken stoppingToken)
     {
         using var client = new MqttClientFactory().CreateMqttClient();
-        using var certificate = certificatePath is null ? null : X509Certificate2.CreateFromPem(File.ReadAllText(certificatePath));
-        var builder = new MqttClientOptionsBuilder()
-            .WithTcpServer(host, port)
-            .WithClientId("demo-console-monitor")
-            .WithProtocolVersion(MqttProtocolVersion.V311)
-            .WithCleanSession(false)
-            .WithKeepAlivePeriod(TimeSpan.FromSeconds(10));
-        if (certificate is not null)
-            builder.WithTlsOptions(new MqttClientTlsOptionsBuilder()
-                .WithTrustChain(new X509Certificate2Collection(certificate)).Build());
-        var options = builder.Build();
+        X509Certificate2? certificate = null;
+        BrokerTarget? connectedTo = null;
         client.ApplicationMessageReceivedAsync += args =>
         {
             var message = args.ApplicationMessage;
@@ -65,9 +91,27 @@ public sealed class WireMonitor(IConfiguration configuration, SparkplugView view
         {
             try
             {
+                var target = CurrentTarget();
+                if (client.IsConnected && target != connectedTo)
+                {
+                    logger.LogInformation("Gateway moved to broker {Host}:{Port}; following it.", target.Host, target.Port);
+                    await client.DisconnectAsync(new MqttClientDisconnectOptionsBuilder().Build(), stoppingToken);
+                }
                 if (!client.IsConnected)
                 {
-                    await client.ConnectAsync(options, stoppingToken);
+                    certificate?.Dispose();
+                    certificate = await LoadCertificateAsync(target, stoppingToken);
+                    var builder = new MqttClientOptionsBuilder()
+                        .WithTcpServer(target.Host, target.Port)
+                        .WithClientId("demo-console-monitor")
+                        .WithProtocolVersion(MqttProtocolVersion.V311)
+                        .WithCleanSession(false)
+                        .WithKeepAlivePeriod(TimeSpan.FromSeconds(10));
+                    if (certificate is not null)
+                        builder.WithTlsOptions(new MqttClientTlsOptionsBuilder()
+                            .WithTrustChain(new X509Certificate2Collection(certificate)).Build());
+                    await client.ConnectAsync(builder.Build(), stoppingToken);
+                    connectedTo = target;
                     await client.SubscribeAsync(new MqttClientFactory().CreateSubscribeOptionsBuilder()
                         .WithTopicFilter(filter, MqttQualityOfServiceLevel.AtLeastOnce).Build(), stoppingToken);
                 }
@@ -83,6 +127,7 @@ public sealed class WireMonitor(IConfiguration configuration, SparkplugView view
                 catch (OperationCanceledException) { break; }
             }
         }
+        certificate?.Dispose();
     }
 
     private void Add(string broker, string topic, byte[] payload, bool retained)

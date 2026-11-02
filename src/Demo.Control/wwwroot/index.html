@@ -284,6 +284,7 @@
         <button class="tab on" data-tab="upstream">On the wire: Mosquitto</button>
         <button class="tab" data-tab="registry">Device registry</button>
         <button class="tab" data-tab="interfaces">Interfaces</button>
+        <button class="tab" data-tab="broker">Broker</button>
         <button class="tab" data-tab="activity">Activity</button>
         <button class="tab" data-tab="logs">Logs</button>
       </div>
@@ -308,6 +309,7 @@ const TAB_NOTES = {
   upstream: "Every Sparkplug message passing through Mosquitto, decoded live, including STATE and NCMD.",
   registry: "Devices in the configuration service. Data acquisition polls every enabled device; changes apply within about 10 seconds.",
   interfaces: "Shared connection settings. TCP polling is supported; Modbus RTU is configuration-only and does not open a serial port.",
+  broker: "MQTT broker settings in the registry. The gateway switches within about 10 seconds; settings that do not connect within the trial window are rejected and the last working ones restored.",
   activity: "Everything that changed, newest first: registry edits, configuration loads, devices online, failing or offline, births and deaths, broker connection and replay, component actions and door/fault commands. Readings are on the wire tab.",
   logs: "Console output of the selected component."
 };
@@ -454,6 +456,7 @@ function renderGateway() {
   $("g-kv").innerHTML = gw ? `
     <dt>Upstream</dt><dd>${esc(gw.upstream)}</dd>
     <dt>Host STATE</dt><dd>${gw.hostOnline ? "online" : "offline: buffering"}</dd>
+    <dt>Broker</dt><dd>${gw.broker?.active ? `${esc(gw.broker.active.host)}:${esc(gw.broker.active.port)} · ${esc(gw.broker.source)}` : "—"}${gw.broker?.trying ? ' <span class="tag warn">trying new</span>' : ""}${gw.broker?.rejected ? ' <span class="tag bad">rejected</span>' : ""}</dd>
     <dt>Session</dt><dd>bdSeq ${esc(gw.bdSeq)}</dd>
     <dt>Last sent</dt><dd>${esc(gw.lastPublished ?? "—")}</dd>` : `<dt>Status</dt><dd>${esc(gatewayUnavailable())}</dd>`;
 }
@@ -633,6 +636,21 @@ async function renderFeed() {
         }).join("") : '<div class="empty">No interfaces configured.</div>');
       return;
     }
+    if (tab === "broker") {
+      if (formOpen) return;
+      const brokers = await getJson("/api/config/brokers");
+      if (tab !== requestedTab || formOpen) return;
+      registryBrokers = brokers;
+      feed.innerHTML = brokerStatus(state.gateway?.broker) + '<button class="btn sm primary" data-broker="add">Add broker</button>' +
+        (brokers.length ? brokers.map(b => `<div class="row" style="grid-template-columns:minmax(0,1fr) auto">
+            <span class="text wrap"><b>${esc(b.id)}</b> · ${esc(b.host)}:${esc(b.port)} ${b.useTls ? '<span class="tag ok">TLS</span>' : '<span class="tag warn">no TLS</span>'}
+              ${usage(b)}<br>
+              <span class="sub" style="font-size:12px">${b.useTls ? `certificate ${esc(b.certificateLocation)}${b.certificateSha256 ? " · pinned" : ""} · ` : ""}keep-alive ${esc(b.keepAliveSeconds)}s · connect timeout ${esc(b.connectTimeoutSeconds)}s · retry ${esc(b.retryDelaySeconds)}–${esc(b.maxRetryDelaySeconds)}s</span></span>
+            <span><button class="btn sm" data-broker="edit/${esc(b.id)}">Edit</button>
+              <button class="btn sm danger" data-broker="delete/${esc(b.id)}">Remove</button></span></div>`).join("")
+          : '<div class="empty">No brokers configured.</div>');
+      return;
+    }
     const messages = await getJson("/api/wire/" + tab);
     if (tab !== requestedTab || formOpen) return;
     const previous = lastWireId;
@@ -693,7 +711,7 @@ function pollStatus(device) {
 // Device form: every field the configuration API accepts. The API does the validation and its message is shown here.
 const REGISTER_TYPES = ["int16", "uint16", "int32", "uint32", "float32"];
 const isBit = register => register === "coil" || register === "discrete";
-let formOpen = false, formEditing = null, registryDevices = [], registryInterfaces = [];
+let formOpen = false, formEditing = null, registryDevices = [], registryInterfaces = [], registryBrokers = [];
 
 function interfaceEndpoint(connection) {
   if (!connection) return "missing interface";
@@ -884,6 +902,85 @@ async function saveInterfaceForm() {
   closeDeviceForm();
 }
 
+// What the gateway reports about its broker connection: settings in use, any trial or rejection, certificate expiry.
+function brokerStatus(b) {
+  if (!state.gateway) return `<div class="hint" style="margin-bottom:8px">${esc(gatewayUnavailable())}.</div>`;
+  if (!b?.active) return '<div class="hint" style="margin-bottom:8px">The gateway has not connected to a broker yet.</div>';
+  const days = b.certificateExpires ? Math.floor((new Date(b.certificateExpires) - Date.now()) / 86400000) : null;
+  const sources = { registry: "from the registry", "last-good": "last working settings", appsettings: "appsettings seed", previous: "previous registry settings" };
+  const reason = text => esc(String(text ?? "").replace(/\.+$/, ""));
+  return `<div class="row" style="grid-template-columns:minmax(0,1fr);margin-bottom:8px"><span class="text wrap">
+    ${state.gateway.upstream === "Online" ? "Gateway uses" : "Gateway was last connected to"} <b>${esc(b.active.id)}</b> ${esc(b.active.host)}:${esc(b.active.port)} (${esc(sources[b.source] ?? b.source)})
+    ${days == null ? "" : days < 0 ? ' <span class="tag bad">certificate expired</span>' : days < 30 ? ` <span class="tag warn">certificate expires in ${days} day(s)</span>` : ` <span class="sub">· certificate valid ${days} more days</span>`}
+    ${b.trying ? `<br><span class="tag warn">trying</span> ${esc(b.trying.host)}:${esc(b.trying.port)} since ${esc(time(b.tryingSince))}; the current settings are restored if it does not connect.` : ""}
+    ${b.rejected ? `<br><span class="tag bad">rejected</span> ${esc(b.rejected.host)}:${esc(b.rejected.port)}: ${reason(b.rejectedReason)}. Fix and save them again to retry.` : ""}
+  </span></div>`;
+}
+
+// Whether the gateway runs on exactly this registry row, or on the same broker ID with other (older) values.
+function usage(b) {
+  const active = state.gateway?.broker?.active;
+  if (active?.id !== b.id) return "";
+  const same = Object.keys(b).every(key => (b[key] ?? null) === (active[key] ?? null));
+  return same ? '<span class="tag ok">used by gateway</span>' : '<span class="tag warn">gateway still on earlier values</span>';
+}
+
+async function brokerAction(action) {
+  const [verb, id] = action.split("/");
+  if (verb === "add" || verb === "edit") {
+    openBrokerForm(verb === "edit" ? registryBrokers.find(b => b.id === id) : null);
+    return;
+  }
+  if (!confirm(`Remove broker ${id}? A gateway that uses it keeps its last working settings.`)) return;
+  const response = await fetch(`/api/config/brokers/${encodeURIComponent(id)}`, { method: "DELETE" });
+  const body = await response.json().catch(() => ({}));
+  toast(response.ok ? `${id} removed.` : body.message || "Remove failed.", !response.ok);
+  renderFeed();
+}
+
+function openBrokerForm(b) {
+  formOpen = true;
+  formEditing = b?.id ?? null;
+  const field = (name, label, value, type = "text", extra = "") => `<label><span>${label}</span><input name="${name}" type="${type}" value="${esc(value ?? "")}"${extra}></label>`;
+  $("feed").innerHTML = `<form class="dform" id="broker-form" autocomplete="off" novalidate>
+    <h3>${b ? `Edit ${esc(b.id)}` : "Add broker"}</h3>
+    <div class="fgrid">${field("id", "Broker ID", b?.id, "text", b ? " readonly" : ' placeholder="cloud"')}
+      ${field("host", "Host", b?.host ?? "127.0.0.1")}${field("port", "Port", b?.port ?? 8883, "number")}
+      <label><span>TLS</span><select name="useTls"><option value="true">On</option><option value="false"${b && !b.useTls ? " selected" : ""}>Off</option></select></label></div>
+    <div class="fgrid">${field("certificateLocation", "Certificate (file path or https URL)", b ? b.certificateLocation : "certs/broker.crt")}
+      ${field("certificateSha256", "SHA-256 fingerprint (required for a URL)", b?.certificateSha256, "text", ' placeholder="64 hex characters"')}</div>
+    <div class="fgrid">${field("keepAliveSeconds", "Keep-alive (s)", b?.keepAliveSeconds ?? 60, "number")}${field("connectTimeoutSeconds", "Connect timeout (s)", b?.connectTimeoutSeconds ?? 10, "number")}
+      ${field("retryDelaySeconds", "Retry delay (s)", b?.retryDelaySeconds ?? 2, "number")}${field("maxRetryDelaySeconds", "Max retry delay (s)", b?.maxRetryDelaySeconds ?? 30, "number")}</div>
+    <div class="hint">Fingerprint: <code>openssl x509 -in broker.crt -noout -fingerprint -sha256</code>, without the colons. The gateway tries new settings for its trial window and keeps the last working ones if they fail. Its client ID and Sparkplug IDs stay in its appsettings.</div>
+    <div class="ferror" id="form-error" role="alert"></div>
+    <div class="factions"><button class="btn primary" data-form="save-broker">Save broker</button>
+      <button class="btn" data-form="cancel">Cancel</button></div></form>`;
+}
+
+async function saveBrokerForm() {
+  const form = $("broker-form");
+  const value = name => form.elements[name].value.trim();
+  const number = name => value(name) === "" ? null : Number(value(name));
+  const useTls = value("useTls") === "true";
+  const broker = {
+    id: value("id"), host: value("host"), port: number("port"), useTls,
+    certificateLocation: useTls ? value("certificateLocation") || null : null,
+    certificateSha256: useTls ? value("certificateSha256").replaceAll(":", "") || null : null,
+    keepAliveSeconds: number("keepAliveSeconds"), connectTimeoutSeconds: number("connectTimeoutSeconds"),
+    retryDelaySeconds: number("retryDelaySeconds"), maxRetryDelaySeconds: number("maxRetryDelaySeconds")
+  };
+  const response = await fetch(formEditing ? `/api/config/brokers/${encodeURIComponent(formEditing)}` : "/api/config/brokers", {
+    method: formEditing ? "PUT" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(broker)
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    $("form-error").textContent = (body.message ?? (body.errors ? Object.values(body.errors).flat().join(" ") : response.statusText)) || "Save failed.";
+    return;
+  }
+  toast(`${broker.id} saved: a gateway using it switches within about 10 seconds.`);
+  closeDeviceForm();
+}
+
 document.addEventListener("click", e => {
   const action = e.target.closest("[data-form]");
   if (!action) return;
@@ -894,6 +991,7 @@ document.addEventListener("click", e => {
   else if (kind === "cancel") closeDeviceForm();
   else if (kind === "save") saveDeviceForm();
   else if (kind === "save-interface") saveInterfaceForm();
+  else if (kind === "save-broker") saveBrokerForm();
 });
 
 // Keep the data type list valid for the area, and word order only for 32-bit types.
@@ -958,6 +1056,8 @@ document.addEventListener("click", e => {
   if (registry) { registryAction(registry.dataset.registry); return; }
   const connection = e.target.closest("[data-interface]");
   if (connection) { interfaceAction(connection.dataset.interface); return; }
+  const brokerButton = e.target.closest("[data-broker]");
+  if (brokerButton) { brokerAction(brokerButton.dataset.broker); return; }
   const demo = e.target.closest("[data-demo]");
   if (demo) {
     if (demo.dataset.demo === "reset" && !confirm("Reset wipes the broker data and demo state, then starts everything fresh. Continue?")) return;

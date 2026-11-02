@@ -14,7 +14,12 @@ public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, Gate
     private readonly BrokerSelector _selector = new(brokers, TimeSpan.FromSeconds(settings.Mqtt.BrokerTrialSeconds));
     private readonly SemaphoreSlim _brokerChanged = new(0, 1);
     public BrokerProfiles Brokers => _brokers;
-    public BrokerState BrokerState => _selector.State(connection.Broker, connection.CertificateExpires);
+    // The broker the gateway last got online with, not a trial attempt that may still fail.
+    private volatile BrokerConnection? _connected;
+    private sealed record BrokerConnection(IoT.Contracts.BrokerProfile Broker, DateTimeOffset? CertificateExpires);
+    public BrokerState BrokerState => _connected is { } current
+        ? _selector.State(current.Broker, current.CertificateExpires)
+        : _selector.State(null, null);
     private readonly PrimaryHostState _host = new();
     private int _rebirthRequested;
     private readonly long _startedAt = Stopwatch.GetTimestamp();
@@ -94,6 +99,7 @@ public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, Gate
                     throw new InvalidOperationException("Connection closed during the birth announcement.");
                 // Proven settings: the fallback for later failures and the restart default.
                 _selector.Connected(broker);
+                _connected = new(broker, connection.CertificateExpires);
                 attempt = 0;
                 delaySeconds = broker.RetryDelaySeconds;
                 switching = await RunSessionAsync(cancellationToken);

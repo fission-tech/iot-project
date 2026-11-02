@@ -108,6 +108,15 @@ async Task<IResult> Forward(IHttpClientFactory factory, HttpMethod method, strin
         return Results.BadRequest(new { message = "Configuration service is not reachable." });
     }
 }
+// Broker connection settings in the registry; the gateway follows the one named by its Mqtt:BrokerId.
+app.MapGet("/api/config/brokers", (IHttpClientFactory factory) => Forward(factory, HttpMethod.Get, "/brokers"));
+app.MapPost("/api/config/brokers", async (HttpContext context, IHttpClientFactory factory) =>
+    await Forward(factory, HttpMethod.Post, "/brokers", await new StreamReader(context.Request.Body).ReadToEndAsync(), "Broker added"));
+app.MapPut("/api/config/brokers/{id}", async (string id, HttpContext context, IHttpClientFactory factory) =>
+    await Forward(factory, HttpMethod.Put, $"/brokers/{Uri.EscapeDataString(id)}",
+        await new StreamReader(context.Request.Body).ReadToEndAsync(), $"{id}: broker settings updated"));
+app.MapDelete("/api/config/brokers/{id}", (string id, IHttpClientFactory factory) =>
+    Forward(factory, HttpMethod.Delete, $"/brokers/{Uri.EscapeDataString(id)}", null, $"{id}: broker removed"));
 app.MapGet("/api/logs/{name}", (string name) => components.Tail(name, 150));
 app.MapGet("/api/activity", () => components.Activity.Recent());
 
