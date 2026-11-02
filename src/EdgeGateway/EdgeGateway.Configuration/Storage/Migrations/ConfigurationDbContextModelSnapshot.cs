@@ -114,6 +114,22 @@ namespace EdgeGateway.Configuration.Storage.Migrations
                         });
                 });
 
+            modelBuilder.Entity("EdgeGateway.Configuration.Storage.StoredGatewayBroker", b =>
+                {
+                    b.Property<string>("GatewayId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("BrokerId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("GatewayId");
+
+                    b.HasIndex("BrokerId");
+
+                    b.ToTable("GatewayBrokers", (string)null);
+                });
+
             modelBuilder.Entity("EdgeGateway.Configuration.Storage.StoredInterface", b =>
                 {
                     b.Property<string>("Id")
@@ -140,6 +156,15 @@ namespace EdgeGateway.Configuration.Storage.Migrations
                     b.HasOne("EdgeGateway.Configuration.Storage.StoredInterface", null)
                         .WithMany()
                         .HasForeignKey("InterfaceId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("EdgeGateway.Configuration.Storage.StoredGatewayBroker", b =>
+                {
+                    b.HasOne("EdgeGateway.Configuration.Storage.StoredBroker", null)
+                        .WithMany()
+                        .HasForeignKey("BrokerId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
                 });

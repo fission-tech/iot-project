@@ -38,7 +38,21 @@ public sealed class ConfigurationDbContext(DbContextOptions<ConfigurationDbConte
                 KeepAliveSeconds = 60, ConnectTimeoutSeconds = 10, RetryDelaySeconds = 2, MaxRetryDelaySeconds = 30
             });
         });
+        model.Entity<StoredGatewayBroker>(entity =>
+        {
+            entity.ToTable("GatewayBrokers");
+            entity.HasKey(x => x.GatewayId);
+            entity.HasIndex(x => x.BrokerId);
+            // A broker that gateways are assigned to cannot be deleted.
+            entity.HasOne<StoredBroker>().WithMany().HasForeignKey(x => x.BrokerId).OnDelete(DeleteBehavior.Restrict);
+        });
     }
+}
+
+public sealed class StoredGatewayBroker
+{
+    public string GatewayId { get; set; } = "";
+    public string BrokerId { get; set; } = "";
 }
 
 public sealed class StoredBroker

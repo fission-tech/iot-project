@@ -30,9 +30,10 @@ try
         ?? throw new InvalidOperationException("Could not read appsettings.json.");
     using var outbox = new Outbox(settings.Gateway.DatabasePath);
     using var connection = new MqttConnection(settings.Mqtt, settings.Sparkplug);
-    // Broker settings come from the registry row named by Mqtt:BrokerId; appsettings is the first-boot seed.
+    // Broker settings come from the registry: the broker assigned to this gateway (its client ID), else the row named
+    // by Mqtt:BrokerId. Appsettings is the first-boot seed.
     var brokers = new BrokerProfiles(settings.Mqtt);
-    using var config = new ConfigClient(settings.Daq, settings.Mqtt.BrokerId);
+    using var config = new ConfigClient(settings.Daq, settings.Mqtt.BrokerId, settings.Mqtt.ClientId);
     var acquisition = new AcquisitionService(settings.Daq, config, outbox, brokers);
     var runner = new GatewayRunner(connection, outbox, settings, brokers);
     Console.WriteLine($"Outbox: {settings.Gateway.DatabasePath} ({outbox.CountUnsent()} unsent). Type stop to exit.");
@@ -87,7 +88,7 @@ try
             {
                 var json = JsonSerializer.Serialize(new
                 {
-                    updatedAt = DateTimeOffset.UtcNow, upstream = connection.State.ToString(),
+                    updatedAt = DateTimeOffset.UtcNow, gatewayId = settings.Mqtt.ClientId, upstream = connection.State.ToString(),
                     hostOnline = runner.HostOnline,
                     unsent = outbox.CountUnsent(), bdSeq = connection.BirthDeathSequence,
                     lastPublished = runner.LastPublished,

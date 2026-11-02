@@ -638,10 +638,11 @@ async function renderFeed() {
     }
     if (tab === "broker") {
       if (formOpen) return;
-      const brokers = await getJson("/api/config/brokers");
-      if (tab !== requestedTab || formOpen) return;
+      const [brokers, assignments] = await Promise.all([getJson("/api/config/brokers"), getJson("/api/config/gateways")]);
+      if (tab !== requestedTab || formOpen || document.activeElement?.id === "gateway-broker") return;
       registryBrokers = brokers;
-      feed.innerHTML = brokerStatus(state.gateway?.broker) + '<button class="btn sm primary" data-broker="add">Add broker</button>' +
+      feed.innerHTML = brokerStatus(state.gateway?.broker) + gatewayAssignment(brokers, assignments) +
+        '<button class="btn sm primary" data-broker="add">Add broker</button>' +
         (brokers.length ? brokers.map(b => `<div class="row" style="grid-template-columns:minmax(0,1fr) auto">
             <span class="text wrap"><b>${esc(b.id)}</b> · ${esc(b.host)}:${esc(b.port)} ${b.useTls ? '<span class="tag ok">TLS</span>' : '<span class="tag warn">no TLS</span>'}
               ${usage(b)}<br>
@@ -917,6 +918,31 @@ function brokerStatus(b) {
   </span></div>`;
 }
 
+// Which registry broker this gateway uses. "Own setting" removes the assignment: the gateway's Mqtt:BrokerId applies.
+function gatewayAssignment(brokers, assignments) {
+  const id = state.gateway?.gatewayId;
+  if (!id) return "";
+  const assigned = assignments.find(a => a.gatewayId === id)?.brokerId ?? "";
+  return `<div class="row" style="grid-template-columns:minmax(0,1fr) auto;margin-bottom:8px"><span class="text wrap">
+      Gateway <b>${esc(id)}</b> uses broker
+      <select id="gateway-broker" data-gateway="${esc(id)}"><option value="">its own setting (Mqtt:BrokerId)</option>
+        ${brokers.map(b => `<option value="${esc(b.id)}"${b.id === assigned ? " selected" : ""}>${esc(b.id)} · ${esc(b.host)}:${esc(b.port)}</option>`).join("")}</select>
+      <div class="hint">Switches only this gateway, live, with the same trial and rollback. Editing a broker's values moves every gateway using it.</div></span></div>`;
+}
+
+async function assignBroker(select) {
+  const id = select.dataset.gateway, brokerId = select.value;
+  const response = await fetch(`/api/config/gateways/${encodeURIComponent(id)}`, brokerId
+    ? { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ gatewayId: id, brokerId }) }
+    : { method: "DELETE" });
+  const body = await response.json().catch(() => ({}));
+  // Removing an assignment that did not exist is already the wanted state.
+  const ok = response.ok || (!brokerId && response.status === 404);
+  toast(ok ? `${id} ${brokerId ? `switches to ${brokerId}` : "uses its own broker setting"} within about 10 seconds.` : body.message || "Change failed.", !ok);
+  select.blur();
+  renderFeed();
+}
+
 // Whether the gateway runs on exactly this registry row, or on the same broker ID with other (older) values.
 function usage(b) {
   const active = state.gateway?.broker?.active;
@@ -1067,7 +1093,10 @@ document.addEventListener("click", e => {
   const t = e.target.closest(".tab");
   if (t) { tab = t.dataset.tab; lastWireId = 0; formOpen = false; formEditing = null; document.querySelectorAll(".tab").forEach(x => x.classList.toggle("on", x === t)); renderFeed(); }
 });
-document.addEventListener("change", e => { if (e.target.id === "log-name") { logName = e.target.value; renderFeed(); } });
+document.addEventListener("change", e => {
+  if (e.target.id === "log-name") { logName = e.target.value; renderFeed(); }
+  if (e.target.id === "gateway-broker") assignBroker(e.target);
+});
 $("run-test").onclick = () => post("/api/demo/resilience", "Starting resilience test");
 
 (async function loop() { await refresh(); setTimeout(loop, 1000); })();

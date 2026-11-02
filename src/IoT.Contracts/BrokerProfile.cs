@@ -2,6 +2,18 @@ using System.Text.Json.Serialization;
 
 namespace IoT.Contracts;
 
+// Which registry broker one gateway uses. The gateway ID is its MQTT client ID. Without an assignment, a gateway
+// uses the broker named by its own Mqtt:BrokerId setting.
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record GatewayAssignment(string GatewayId, string BrokerId)
+{
+    public void Validate()
+    {
+        DeviceRegistration.ValidateId(GatewayId, "Gateway ID");
+        DeviceRegistration.ValidateId(BrokerId, "Broker ID");
+    }
+}
+
 // Where the broker is, how to trust it and how to keep the connection alive. The gateway's own identity
 // (client ID, Sparkplug IDs) stays in its local settings. The certificate is a file path on the gateway box
 // or an https URL; never the certificate or a key itself.

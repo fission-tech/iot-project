@@ -4,9 +4,10 @@ using IoT.Contracts;
 
 namespace EdgeGateway.Gateway.Configuration;
 
-// Fetches the device list (and, with a broker ID, that broker's settings) from the configuration service and keeps
-// a local copy, so data acquisition keeps polling even when the configuration service is down.
-public sealed class ConfigClient(DaqSettings settings, string? brokerId = null) : IDisposable
+// Fetches the device list and this gateway's broker settings from the configuration service and keeps a local copy,
+// so data acquisition keeps polling even when the configuration service is down. The broker is the one the registry
+// assigns to gatewayId, else the one named by brokerId.
+public sealed class ConfigClient(DaqSettings settings, string? brokerId = null, string? gatewayId = null) : IDisposable
 {
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(3) };
     private readonly string _cachePath = Path.Combine(settings.StateDirectory, "config-cache.json");
@@ -17,11 +18,13 @@ public sealed class ConfigClient(DaqSettings settings, string? brokerId = null) 
         try
         {
             var url = settings.ConfigUrl.TrimEnd('/') + "/config";
+            var query = string.Join("&", new[] { ("broker", brokerId), ("gateway", gatewayId) }
+                .Where(item => item.Item2 is not null).Select(item => $"{item.Item1}={Uri.EscapeDataString(item.Item2!)}"));
             GatewayConfiguration? configuration;
             try
             {
                 configuration = await _http.GetFromJsonAsync<GatewayConfiguration>(
-                    brokerId is null ? url : url + "?broker=" + Uri.EscapeDataString(brokerId), EdgeTopics.Json, cancellationToken);
+                    query == "" ? url : url + "?" + query, EdgeTopics.Json, cancellationToken);
                 _brokerMissing = false;
             }
             catch (HttpRequestException error) when (error.StatusCode == System.Net.HttpStatusCode.NotFound && brokerId is not null)

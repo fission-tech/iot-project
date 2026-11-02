@@ -92,8 +92,28 @@ internal static class BrokerProfileChecks
                 Check(store.Snapshot().Version == 3, "create/delete did not bump the version");
             }
             using (var store = new EdgeGateway.Configuration.DeviceStore(path))
+            {
                 Check(store.FindBroker("cloud")?.Host == "broker.example.com", "broker settings did not survive a restart");
-            Console.WriteLine("PASS: Brokers table: migration seed, snapshot with/without broker, unknown broker, create/update/delete with version bumps, lower-case fingerprints, refused invalid saves and protected last broker.");
+
+                // Per-gateway assignment: wins over the broker the gateway names itself, and protects that broker.
+                Check(store.SaveBroker(Broker() with { Id = "b", Port = 8884 }, create: true), "broker b not created");
+                var before = store.Snapshot().Version;
+                Check(store.Snapshot("cloud", "gateway-01")!.Broker!.Id == "cloud", "unassigned gateway did not use its own broker");
+                store.Assign(new("gateway-01", "b"));
+                Check(store.Snapshot().Version == before + 1, "assignment did not bump the version");
+                Check(store.Snapshot("cloud", "gateway-01")!.Broker!.Id == "b", "assignment did not win over the gateway's own setting");
+                Check(store.Snapshot("cloud", "gateway-02")!.Broker!.Id == "cloud", "assignment leaked to another gateway");
+                Check(store.Snapshot("missing", "gateway-01")!.Broker!.Id == "b", "an assigned gateway naming a missing broker was refused");
+                Check(store.AllAssignments().Single() == new GatewayAssignment("gateway-01", "b"), "assignment not listed");
+                Reject(() => store.Assign(new("gateway-01", "absent")), "assignment to a missing broker");
+                Reject(() => store.Assign(new("gate way", "b")), "invalid gateway ID");
+                try { store.DeleteBroker("b"); throw new Exception("Broker profile: an assigned broker was deleted"); }
+                catch (EdgeGateway.Configuration.ConfigurationConflictException error) when (error.Message.Contains("gateway-01")) { }
+                Check(store.Unassign("gateway-01") && !store.Unassign("gateway-01"), "unassign did not report correctly");
+                Check(store.Snapshot("cloud", "gateway-01")!.Broker!.Id == "cloud", "unassigned gateway did not return to its own broker");
+                Check(store.DeleteBroker("b"), "a no longer assigned broker could not be deleted");
+            }
+            Console.WriteLine("PASS: Brokers table: migration seed, snapshot with/without broker, unknown broker, create/update/delete with version bumps, lower-case fingerprints, refused invalid saves, protected last broker, and per-gateway assignments that win over the gateway's own setting and protect their broker.");
         }
         finally
         {

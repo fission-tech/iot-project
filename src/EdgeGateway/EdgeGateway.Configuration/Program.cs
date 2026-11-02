@@ -21,7 +21,7 @@ var store = app.Services.GetRequiredService<DeviceStore>();
 
 app.MapGet("/", () => "Edge gateway configuration service.");
 app.MapGet("/health", () => "ok");
-app.MapGet("/config", (string? broker) => store.Snapshot(broker) is { } snapshot
+app.MapGet("/config", (string? broker, string? gateway) => store.Snapshot(broker, gateway) is { } snapshot
     ? Results.Ok(snapshot)
     : Results.NotFound(new { message = $"Broker {broker} does not exist." }));
 app.MapGet("/devices", () => store.All());
@@ -60,6 +60,16 @@ app.MapPut("/brokers/{id}", (string id, BrokerProfile broker) => Write(() => bro
     ? Results.BadRequest(new { message = "The broker ID in the body must match the URL." })
     : store.SaveBroker(broker, create: false) ? Results.Ok(broker) : Results.NotFound()));
 app.MapDelete("/brokers/{id}", (string id) => Write(() => store.DeleteBroker(id) ? Results.NoContent() : Results.NotFound()));
+
+// Which broker each gateway uses (gateway ID = its MQTT client ID). Unassigned gateways use their own Mqtt:BrokerId.
+app.MapGet("/gateways", () => store.AllAssignments());
+app.MapPut("/gateways/{id}", (string id, GatewayAssignment assignment) => Write(() =>
+{
+    if (assignment.GatewayId != id) return Results.BadRequest(new { message = "The gateway ID in the body must match the URL." });
+    store.Assign(assignment);
+    return Results.Ok(assignment);
+}));
+app.MapDelete("/gateways/{id}", (string id) => store.Unassign(id) ? Results.NoContent() : Results.NotFound());
 
 Console.WriteLine($"Configuration service: {builder.Configuration["Configuration:Url"] ?? "http://127.0.0.1:5300"} ({store.All().Length} devices).");
 app.Run();

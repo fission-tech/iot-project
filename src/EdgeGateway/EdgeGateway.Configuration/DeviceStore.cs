@@ -81,13 +81,17 @@ public sealed class DeviceStore : IDisposable
     // Resolve in one read transaction: cacheable polling definitions cannot mix old/new interface settings.
     public GatewayConfiguration Snapshot() => Snapshot(null)!;
 
-    // With a broker ID the snapshot also carries that broker; null when no such broker exists.
-    public GatewayConfiguration? Snapshot(string? brokerId)
+    // With a gateway or broker ID the snapshot also carries a broker: the gateway's registry assignment if it has
+    // one, else the broker it names itself. Null when that named broker does not exist.
+    public GatewayConfiguration? Snapshot(string? brokerId, string? gatewayId = null)
     {
         lock (_gate)
         {
             using var transaction = _connection.BeginTransaction(deferred: true);
             var version = (long)Scalar("SELECT Value FROM Meta WHERE Key = 'Version'", transaction)!;
+            if (gatewayId is not null && Scalar("SELECT BrokerId FROM GatewayBrokers WHERE GatewayId = $id", transaction,
+                    ("$id", gatewayId)) is string assigned)
+                brokerId = assigned;
             BrokerProfile? broker = null;
             if (brokerId is not null && (broker = FindBroker(brokerId, transaction)) is null) return null;
             using var command = Command("""
@@ -180,6 +184,50 @@ public sealed class DeviceStore : IDisposable
     public bool DeleteInterface(string id) => DeleteRecord("Interfaces", id);
     public bool DeleteBroker(string id) => DeleteRecord("Brokers", id);
 
+    public GatewayAssignment[] AllAssignments()
+    {
+        lock (_gate)
+        {
+            using var command = Command("SELECT GatewayId, BrokerId FROM GatewayBrokers ORDER BY GatewayId");
+            using var reader = command.ExecuteReader();
+            var assignments = new List<GatewayAssignment>();
+            while (reader.Read()) assignments.Add(new(reader.GetString(0), reader.GetString(1)));
+            return assignments.ToArray();
+        }
+    }
+
+    // Points one gateway at a registry broker; the gateway switches on its next refresh (with trial and rollback).
+    public void Assign(GatewayAssignment assignment)
+    {
+        assignment.Validate();
+        lock (_gate)
+        {
+            using var transaction = _connection.BeginTransaction();
+            if (FindBroker(assignment.BrokerId, transaction) is null)
+                throw new ArgumentException($"Broker {assignment.BrokerId} does not exist.");
+            Execute("""
+                INSERT INTO GatewayBrokers (GatewayId, BrokerId) VALUES ($gateway, $broker)
+                ON CONFLICT(GatewayId) DO UPDATE SET BrokerId = excluded.BrokerId
+                """, transaction, ("$gateway", assignment.GatewayId), ("$broker", assignment.BrokerId));
+            BumpVersion(transaction);
+            transaction.Commit();
+        }
+    }
+
+    // The gateway goes back to the broker named by its own Mqtt:BrokerId.
+    public bool Unassign(string gatewayId)
+    {
+        lock (_gate)
+        {
+            using var transaction = _connection.BeginTransaction();
+            using var command = Command("DELETE FROM GatewayBrokers WHERE GatewayId = $id", transaction, ("$id", gatewayId));
+            if (command.ExecuteNonQuery() == 0) return false;
+            BumpVersion(transaction);
+            transaction.Commit();
+            return true;
+        }
+    }
+
     public BrokerProfile[] AllBrokers()
     {
         lock (_gate)
@@ -228,7 +276,10 @@ public sealed class DeviceStore : IDisposable
             using var transaction = _connection.BeginTransaction();
             if (table == "Interfaces" && Scalar("SELECT 1 FROM Devices WHERE InterfaceId = $id LIMIT 1", transaction, ("$id", id)) is not null)
                 throw new ConfigurationConflictException($"Interface {id} is used by registered devices. Reassign or remove those devices first.");
-            // Gateways choose their broker locally, so the registry cannot see which one is in use. Never leave none.
+            if (table == "Brokers" && Scalar("SELECT group_concat(GatewayId, ', ') FROM GatewayBrokers WHERE BrokerId = $id", transaction,
+                    ("$id", id)) is string users)
+                throw new ConfigurationConflictException($"Broker {id} is assigned to gateway(s) {users}. Assign them another broker first.");
+            // Gateways without an assignment name their broker locally, so the registry cannot see those. Never leave none.
             if (table == "Brokers" && FindBroker(id, transaction) is not null && (long)Scalar("SELECT COUNT(*) FROM Brokers", transaction)! == 1)
                 throw new ConfigurationConflictException($"Broker {id} is the only broker. Add another before removing it.");
             using var command = Command($"DELETE FROM {table} WHERE Id = $id", transaction, ("$id", id));

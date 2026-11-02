@@ -117,6 +117,12 @@ app.MapPut("/api/config/brokers/{id}", async (string id, HttpContext context, IH
         await new StreamReader(context.Request.Body).ReadToEndAsync(), $"{id}: broker settings updated"));
 app.MapDelete("/api/config/brokers/{id}", (string id, IHttpClientFactory factory) =>
     Forward(factory, HttpMethod.Delete, $"/brokers/{Uri.EscapeDataString(id)}", null, $"{id}: broker removed"));
+app.MapGet("/api/config/gateways", (IHttpClientFactory factory) => Forward(factory, HttpMethod.Get, "/gateways"));
+app.MapPut("/api/config/gateways/{id}", async (string id, HttpContext context, IHttpClientFactory factory) =>
+    await Forward(factory, HttpMethod.Put, $"/gateways/{Uri.EscapeDataString(id)}",
+        await new StreamReader(context.Request.Body).ReadToEndAsync(), $"{id}: broker assignment changed"));
+app.MapDelete("/api/config/gateways/{id}", (string id, IHttpClientFactory factory) =>
+    Forward(factory, HttpMethod.Delete, $"/gateways/{Uri.EscapeDataString(id)}", null, $"{id}: back to its own broker setting"));
 app.MapGet("/api/logs/{name}", (string name) => components.Tail(name, 150));
 app.MapGet("/api/activity", () => components.Activity.Recent());
 
