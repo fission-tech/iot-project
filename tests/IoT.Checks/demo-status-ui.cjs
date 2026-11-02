@@ -37,6 +37,15 @@ const refresh = () => vm.runInContext('refresh()', context);
   await refresh();
   assert.equal(element('g-unsent').textContent, 7);
   assert(element('d-meter-01').textContent.includes('polling'));
+  snapshot.devices[0] = { ...snapshot.devices[0], state: 'failing', failures: 0,
+    lastError: 'holding 200+1: IllegalDataAddress', lastRaw: [], frames: ['holding 0+2', 'holding 200+1'] };
+  await refresh();
+  assert(element('d-gateway').textContent.includes('polling 1/1'), 'Partial frame failure hid active polling');
+  const detail = vm.runInContext("pollStatus({id:'meter-01', enabled:true})", context);
+  assert(detail.includes('frame read error: holding 200+1: IllegalDataAddress'));
+  assert(!detail.includes('0 failed poll'), 'Partial quality error was described as a communication failure');
+  snapshot.devices[0].failures = 2;
+  assert(vm.runInContext("pollStatus({id:'meter-01', enabled:true})", context).includes('2 consecutive communication failure(s)'));
   snapshot = null; registryAvailable = false;
   await refresh();
   assert(element('pipeline').innerHTML.includes('meter-01'), 'Temporary registry failure lost last registry list');

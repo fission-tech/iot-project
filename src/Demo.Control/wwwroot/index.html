@@ -380,6 +380,8 @@ function buildPipeline() {
 }
 
 const DEVICE_TONE = { polling: "ok", failing: "bad", offline: "bad", connecting: "idle" };
+const isPolling = s => s?.state === "polling" || (s?.state === "failing" && s.failures === 0);
+const pollErrorLabel = s => s.failures ? `${s.failures} consecutive communication failure(s)` : "frame read error";
 const gatewayRunning = () => state?.components.some(c => c.name === "gateway" && c.running) ?? false;
 const gatewayUnavailable = () => gatewayRunning() ? "Gateway running · live status temporarily unavailable" : "Gateway not running";
 
@@ -395,7 +397,7 @@ function nodeDetail(c, gw) {
   switch (c.name) {
     case "gateway":
       if (!gw) return "running · waiting for live status";
-      return `polling ${(gw.devices ?? []).filter(s => s.state === "polling").length}/${(gw.devices ?? []).length} device(s) · ${gw.upstream === "Online" ? "publishing" : "broker unreachable"} · ${gw.unsent} buffered`;
+      return `polling ${(gw.devices ?? []).filter(isPolling).length}/${(gw.devices ?? []).length} device(s) · ${gw.upstream === "Online" ? "publishing" : "broker unreachable"} · ${gw.unsent} buffered`;
     case "configuration": return state.configurationReachable ? "serving the device list" : "starting…";
     default: return state.monitors.upstream ? "running · persistence on" : "running · connecting";
   }
@@ -423,7 +425,7 @@ function renderPipeline() {
     $("d-" + id).textContent = s
       ? `${s.endpoint} · ${s.state}${s.lastSeq ? ` · #${s.lastSeq}` : ""}${s.lastError ? ` · ${s.lastError.split(":")[0]}` : ""}`
       : gatewayRunning() ? "enabled in registry · waiting for live polling status" : "gateway stopped";
-    $("l-" + id).classList.toggle("cut", !(up.gateway && s?.state === "polling"));
+    $("l-" + id).classList.toggle("cut", !(up.gateway && isPolling(s)));
   }
   $("l-mosquitto").classList.toggle("cut", !(up.gateway && up.mosquitto));
   // The gateway asks the registry every 10 s; when the registry is down it keeps polling from its cached copy.
@@ -518,7 +520,7 @@ function renderView() {
       const s = gatewayDevice(id);
       return `<div class="dcard" style="--dc:${color(id)}"><div class="top"><span class="id">${esc(id)}</span></div>
         <div class="empty" style="padding:4px 0">${s ? (s.lastError ? `no data yet: ${esc(s.lastError)}` : `state ${esc(s.state)}, no reading yet`) : "not born yet"}</div>
-        ${s?.state === "failing" || s?.state === "offline" ? `<div class="tags"><span class="tag bad">${esc(s.state)} &middot; ${s.failures} failed poll(s)</span></div>` : ""}</div>`;
+        ${s?.state === "failing" || s?.state === "offline" ? `<div class="tags"><span class="tag bad">${esc(s.state)} &middot; ${pollErrorLabel(s)}</span></div>` : ""}</div>`;
     }
     return `<div class="dcard" style="--dc:${color(id)}">
       <div class="top"><span class="id">${esc(id)}</span><span class="meta">GPIO ${esc(d.gpioPin)}</span></div>
@@ -685,7 +687,7 @@ function pollStatus(device) {
   return `<div class="pstat">
     <span class="tag ${tone}">${esc(s.state)}</span>
     <span>last reading #${esc(s.lastSeq || "—")} · polled ${esc(ago(s.lastPollAt))} · last good ${esc(ago(s.lastSuccessAt))}</span>
-    ${s.lastError ? `<div class="perr">${s.failures} failed poll(s): ${esc(s.lastError)}</div>` : ""}
+    ${s.lastError ? `<div class="perr">${pollErrorLabel(s)}: ${esc(s.lastError)}</div>` : ""}
     <div class="praw">frames: ${esc(s.frames.join(", "))}${raw ? `<br>raw registers: ${raw}` : ""}</div>
   </div>`;
 }
@@ -947,7 +949,7 @@ async function refresh() {
   const arrived = (view?.summaries ?? []).filter(s => previousCounts[s.deviceId] !== undefined && s.readings > previousCounts[s.deviceId]).map(s => s.deviceId);
   if (arrived.length) pulse(...arrived, "mosquitto", "subscribers");
   else if (state.gateway?.unsent > 0)
-    pulse(...(state.gateway?.devices ?? []).filter(s => s.state === "polling").map(s => s.deviceId));
+    pulse(...(state.gateway?.devices ?? []).filter(isPolling).map(s => s.deviceId));
   await renderFeed();
 }
 
