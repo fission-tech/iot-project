@@ -50,9 +50,11 @@ Root `appsettings.json` (ignored by Git) holds shared settings; the settings cla
 ```json
 {
   "Sparkplug": { "GroupId": "warehouse-01", "EdgeNodeId": "gateway-01", "HostId": "" },
-  "Mqtt": { "Host": "127.0.0.1", "Port": 8883, "ClientId": "gateway-01", "UseTls": true, "BrokerCertificatePath": "certs/broker.crt" }
+  "Mqtt": { "BrokerId": "local", "ClientId": "gateway-01", "Host": "127.0.0.1", "Port": 8883, "UseTls": true, "BrokerCertificatePath": "certs/broker.crt" }
 }
 ```
+
+The broker itself (host, port, TLS, certificate, keep-alive, timeouts, retries) comes from the configuration service's `Brokers` table: `Mqtt:BrokerId` names the row, and the other `Mqtt` connection keys are only the first-boot seed and last resort. The gateway's identity (client ID, Sparkplug IDs) stays here. Registry changes apply live; settings that do not connect are rolled back to the last working ones. See [broker-settings.md](docs/broker-settings.md).
 
 The backend (`Application.Api`) is not part of this flow; MQTTX and the demo console are the consumers. A non-empty `HostId` would make the gateway wait for a Sparkplug Primary Host's STATE, so both launchers start the gateway with an empty one.
 
@@ -78,6 +80,8 @@ This opens `http://127.0.0.1:5200` (loopback only, because it starts and kills p
 - **Device registry tab:** add, edit, enable, disable or remove devices with a form covering every field, and see what the gateway is doing with each one: state, read frames, raw register values and the last error.
 - **Interfaces tab:** create/edit shared TCP or configuration-only RTU settings, see the number of referencing devices, and remove unused interfaces. Add Device can select an existing interface or create one inline. A new interface and device commit together; validation/conflict errors leave neither new record saved. Device editing selects an existing interface.
 
+- **Broker tab:** edit the registry's broker settings (host, port, TLS, certificate path or pinned https URL, timing) and see which settings the gateway is connected with, any trial or rejection, and the certificate expiry.
+
 For an API client, `POST /devices/with-interface` accepts `{ "device": { ... }, "newInterface": { ... } }`, using the same device and interface fields as the separate endpoints. `device.interfaceId` must match `newInterface.id`. Both IDs must be new; the configuration version increments once.
 - **Activity tab:** every change in one timeline: registry edits, configuration loads, devices online, failing or offline, births and deaths, broker connection and replay, component actions.
 - **Resilience test:** crashes Mosquitto, the gateway and the configuration service, then checks every reading the gateway polled arrived on Mosquitto exactly once.
@@ -98,7 +102,8 @@ In MQTTX, connect to `127.0.0.1:8883` with TLS, trust `broker/certs/broker.crt`,
 
 - **Broker connection history:** the Gateway records observed outages, reconnect times, downtime and buffered/acknowledged message counts in `BrokerHistory` inside its runtime DB. Gateway schema is managed by EF Core migrations, applied at startup. The initial switch from pre-EF storage requires a fresh Gateway DB; Configuration DB is kept. See [broker-history.md](docs/broker-history.md) for migrations, schema, NULL meaning, limits and manual demo steps.
 
-- **Automatic reconnect:** the gateway retries Mosquitto with backoff (2 s doubling to 30 s), then sends a new NBIRTH and a DBIRTH per online device.
+- **Automatic reconnect:** the gateway retries Mosquitto with backoff (by default 2 s doubling to 30 s, set per broker in the registry), then sends a new NBIRTH and a DBIRTH per online device.
+- **Broker changes:** new registry settings are tried for 60 s; if they never connect while the last working settings do, those are restored and the new ones rejected. No readings are lost during a switch. See [broker-settings.md](docs/broker-settings.md).
 - **Data restored after disconnects:** every polled reading is committed to the SQLite outbox first; after a reconnect the backlog is replayed in order, marked `is_historical`, and each row is deleted only after the broker's acknowledgement.
 - **Source timestamps:** a reading carries the time the poll request was sent, and keeps it through buffering and replay.
 - **Storage failures:** the affected poller pauses and retries the same sample or offline event every second. Storage errors do not count as device failures. One pending sample stays in memory; stopping before it can be saved logs a warning, and that sample will be lost.
