@@ -4,19 +4,33 @@ using IoT.Contracts;
 
 namespace EdgeGateway.Gateway.Configuration;
 
-// Fetches the device list from the configuration service and keeps a local copy,
-// so data acquisition keeps polling even when the configuration service is down.
-public sealed class ConfigClient(DaqSettings settings) : IDisposable
+// Fetches the device list (and, with a broker ID, that broker's settings) from the configuration service and keeps
+// a local copy, so data acquisition keeps polling even when the configuration service is down.
+public sealed class ConfigClient(DaqSettings settings, string? brokerId = null) : IDisposable
 {
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(3) };
     private readonly string _cachePath = Path.Combine(settings.StateDirectory, "config-cache.json");
+    private bool _brokerMissing;
 
     public async Task<GatewayConfiguration?> TryFetchAsync(CancellationToken cancellationToken)
     {
         try
         {
-            var configuration = await _http.GetFromJsonAsync<GatewayConfiguration>(
-                settings.ConfigUrl.TrimEnd('/') + "/config", EdgeTopics.Json, cancellationToken);
+            var url = settings.ConfigUrl.TrimEnd('/') + "/config";
+            GatewayConfiguration? configuration;
+            try
+            {
+                configuration = await _http.GetFromJsonAsync<GatewayConfiguration>(
+                    brokerId is null ? url : url + "?broker=" + Uri.EscapeDataString(brokerId), EdgeTopics.Json, cancellationToken);
+                _brokerMissing = false;
+            }
+            catch (HttpRequestException error) when (error.StatusCode == System.Net.HttpStatusCode.NotFound && brokerId is not null)
+            {
+                // A removed or renamed broker must not stop device updates; the gateway keeps its working broker.
+                if (!_brokerMissing) Console.WriteLine($"Broker {brokerId} is not in the registry. Devices still update; broker settings stay as they are.");
+                _brokerMissing = true;
+                configuration = await _http.GetFromJsonAsync<GatewayConfiguration>(url, EdgeTopics.Json, cancellationToken);
+            }
             if (configuration is null) return null;
             configuration.Validate(); // Do not replace a usable cache with an invalid/old-format snapshot.
             Directory.CreateDirectory(settings.StateDirectory);

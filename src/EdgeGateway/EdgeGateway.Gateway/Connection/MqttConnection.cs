@@ -3,6 +3,7 @@ using System.Security.Cryptography.X509Certificates;
 using EdgeGateway.Gateway.Configuration;
 using EdgeGateway.Gateway.Sparkplug;
 using Google.Protobuf;
+using IoT.Contracts;
 using MQTTnet;
 using MQTTnet.Formatter;
 using MQTTnet.Exceptions;
@@ -15,40 +16,24 @@ public sealed class MqttConnection : IDisposable
     private readonly IMqttClient _client = new MqttClientFactory().CreateMqttClient();
     private readonly ConnectionStateMachine _state = new();
     private TaskCompletionSource _disconnected = NewDisconnectSignal();
-    private readonly MqttClientOptionsBuilder _optionsBuilder;
+    private readonly MqttSettings _settings;
     private readonly BirthDeathSequenceStore _sequenceStore;
     private readonly string _deathTopic;
     public ulong BirthDeathSequence { get; private set; }
     public bool IsConnected => _client.IsConnected;
     public ConnectionState State => _state.Current;
+    // The broker settings of the latest connection attempt, and the expiry of the certificate it trusted.
+    public BrokerProfile? Broker { get; private set; }
+    public DateTimeOffset? CertificateExpires { get; private set; }
     public event Func<string, byte[], Task>? MessageReceived;
     public event Action<bool, DateTimeOffset>? ConnectivityChanged;
     private volatile bool _intentionalDisconnect;
-    private readonly X509Certificate2? _trustedCertificate;
+    private X509Certificate2? _trustedCertificate;
 
+    // Identity (client ID, bdSeq, death topic) is fixed; the broker can change between connections.
     public MqttConnection(MqttSettings settings, SparkplugSettings sparkplug)
     {
-        var builder = new MqttClientOptionsBuilder()
-            .WithTcpServer(settings.Host, settings.Port)
-            .WithClientId(settings.ClientId)
-            .WithProtocolVersion(MqttProtocolVersion.V311)
-            .WithCleanSession()
-            .WithTimeout(TimeSpan.FromSeconds(settings.ConnectTimeoutSeconds))
-            .WithKeepAlivePeriod(TimeSpan.FromSeconds(settings.KeepAliveSeconds));
-
-        if (settings.UseTls)
-        {
-            var certificatePath = Path.Combine(AppContext.BaseDirectory, settings.BrokerCertificatePath);
-            _trustedCertificate = X509Certificate2.CreateFromPem(File.ReadAllText(certificatePath));
-            var trustedCertificates = new X509Certificate2Collection(_trustedCertificate);
-
-            // Trust our local broker certificate while keeping TLS verification enabled.
-            builder.WithTlsOptions(new MqttClientTlsOptionsBuilder()
-                .WithTrustChain(trustedCertificates)
-                .Build());
-        }
-
-        _optionsBuilder = builder;
+        _settings = settings;
         _sequenceStore = new BirthDeathSequenceStore(settings.ClientId, settings.StateDirectory);
         _deathTopic = SparkplugTopics.NodeDeath(sparkplug);
         _client.ConnectedAsync += _ =>
@@ -72,7 +57,7 @@ public sealed class MqttConnection : IDisposable
             ?? Task.CompletedTask;
     }
 
-    public async Task ConnectAsync(CancellationToken cancellationToken)
+    public async Task ConnectAsync(BrokerProfile broker, CancellationToken cancellationToken)
     {
         if (!_state.TryMoveTo(ConnectionState.Connecting))
             throw new InvalidOperationException("Gateway cannot connect in its current state.");
@@ -81,20 +66,16 @@ public sealed class MqttConnection : IDisposable
         {
             _intentionalDisconnect = false;
             _disconnected = NewDisconnectSignal();
+            Broker = broker;
             BirthDeathSequence = _sequenceStore.ReserveNext();
-            var options = _optionsBuilder
-                .WithWillTopic(_deathTopic)
-                .WithWillPayload(SparkplugPayloads.NodeDeath(BirthDeathSequence).ToByteArray())
-                .WithWillQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
-                .WithWillRetain(false)
-                .Build();
             try
             {
+                var options = await BuildOptionsAsync(broker, cancellationToken);
                 await _client.ConnectAsync(options, cancellationToken);
             }
             catch (Exception) when (!cancellationToken.IsCancellationRequested)
             {
-                // Includes first-start connection failures; local bdSeq/storage errors are outside this catch.
+                // Includes first-start connection and certificate failures; local bdSeq/storage errors are outside this catch.
                 ConnectivityChanged?.Invoke(false, DateTimeOffset.UtcNow);
                 throw;
             }
@@ -107,6 +88,34 @@ public sealed class MqttConnection : IDisposable
             _state.TryMoveTo(ConnectionState.Disconnected);
             throw;
         }
+    }
+
+    private async Task<MqttClientOptions> BuildOptionsAsync(BrokerProfile broker, CancellationToken cancellationToken)
+    {
+        var builder = new MqttClientOptionsBuilder()
+            .WithTcpServer(broker.Host, broker.Port)
+            .WithClientId(_settings.ClientId)
+            .WithProtocolVersion(MqttProtocolVersion.V311)
+            .WithCleanSession()
+            .WithTimeout(TimeSpan.FromSeconds(broker.ConnectTimeoutSeconds))
+            .WithKeepAlivePeriod(TimeSpan.FromSeconds(broker.KeepAliveSeconds))
+            .WithWillTopic(_deathTopic)
+            .WithWillPayload(SparkplugPayloads.NodeDeath(BirthDeathSequence).ToByteArray())
+            .WithWillQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
+            .WithWillRetain(false);
+        _trustedCertificate?.Dispose();
+        _trustedCertificate = null;
+        CertificateExpires = null;
+        if (broker.UseTls)
+        {
+            // Trust exactly the configured broker certificate while keeping TLS verification enabled.
+            _trustedCertificate = await BrokerCertificates.LoadAsync(broker, _settings.StateDirectory, cancellationToken);
+            CertificateExpires = new DateTimeOffset(_trustedCertificate.NotAfter.ToUniversalTime(), TimeSpan.Zero);
+            builder.WithTlsOptions(new MqttClientTlsOptionsBuilder()
+                .WithTrustChain(new X509Certificate2Collection(_trustedCertificate))
+                .Build());
+        }
+        return builder.Build();
     }
 
     private static TaskCompletionSource NewDisconnectSignal() =>

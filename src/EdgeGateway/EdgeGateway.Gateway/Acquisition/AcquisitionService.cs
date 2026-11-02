@@ -7,7 +7,8 @@ namespace EdgeGateway.Gateway.Acquisition;
 
 // Runs one poller per configured device. Follows the configuration service: added devices start polling,
 // removed or disabled ones leave with a DDEATH. Keeps the last device list if the service is unreachable.
-public sealed class AcquisitionService(DaqSettings settings, ConfigClient config, Outbox outbox)
+public sealed class AcquisitionService(DaqSettings settings, ConfigClient config, Outbox outbox,
+    Connection.BrokerProfiles? brokers = null)
 {
     private readonly Dictionary<string, (ModbusPoller Poller, CancellationTokenSource Stop, Task Task)> _pollers = [];
     private readonly object _gate = new();
@@ -53,6 +54,8 @@ public sealed class AcquisitionService(DaqSettings settings, ConfigClient config
                     lock (_gate) _configReachable = true;
                     if (fetched.Version != version)
                     {
+                        // Broker settings do not depend on device storage, so they are handed over first.
+                        brokers?.Offer(fetched.Broker);
                         try
                         {
                             await ApplyAsync(fetched.Devices, cancellationToken);

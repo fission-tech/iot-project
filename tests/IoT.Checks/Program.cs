@@ -369,6 +369,7 @@ finally
 
 await ModbusChecks.RunAsync();
 BrokerProfileChecks.Run();
+await GatewayBrokerChecks.RunAsync();
 BrokerHistoryChecks.Run();
 DemoStatusChecks.Run();
 ConfigurationMigrationChecks.Run();

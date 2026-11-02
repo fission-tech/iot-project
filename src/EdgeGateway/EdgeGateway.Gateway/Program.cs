@@ -30,9 +30,11 @@ try
         ?? throw new InvalidOperationException("Could not read appsettings.json.");
     using var outbox = new Outbox(settings.Gateway.DatabasePath);
     using var connection = new MqttConnection(settings.Mqtt, settings.Sparkplug);
-    using var config = new ConfigClient(settings.Daq);
-    var acquisition = new AcquisitionService(settings.Daq, config, outbox);
-    var runner = new GatewayRunner(connection, outbox, settings);
+    // Broker settings come from the registry row named by Mqtt:BrokerId; appsettings is the first-boot seed.
+    var brokers = new BrokerProfiles(settings.Mqtt);
+    using var config = new ConfigClient(settings.Daq, settings.Mqtt.BrokerId);
+    var acquisition = new AcquisitionService(settings.Daq, config, outbox, brokers);
+    var runner = new GatewayRunner(connection, outbox, settings, brokers);
     Console.WriteLine($"Outbox: {settings.Gateway.DatabasePath} ({outbox.CountUnsent()} unsent). Type stop to exit.");
     var input = Task.Run(() =>
     {

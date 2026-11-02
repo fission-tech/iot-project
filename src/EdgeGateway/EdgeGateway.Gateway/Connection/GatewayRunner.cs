@@ -7,8 +7,10 @@ using MQTTnet.Protocol;
 
 namespace EdgeGateway.Gateway.Connection;
 
-public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, GatewaySettings settings)
+public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, GatewaySettings settings, BrokerProfiles? brokers = null)
 {
+    private readonly BrokerProfiles _brokers = brokers ?? new BrokerProfiles(settings.Mqtt);
+    public BrokerProfiles Brokers => _brokers;
     private readonly PrimaryHostState _host = new();
     private int _rebirthRequested;
     private readonly long _startedAt = Stopwatch.GetTimestamp();
@@ -57,14 +59,16 @@ public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, Gate
             else if (topic == commandTopic) RequestRebirth(payload);
             return Task.CompletedTask;
         };
-        var delaySeconds = mqtt.RetryDelaySeconds;
+        var broker = _brokers.Desired ?? _brokers.Fallback;
+        var delaySeconds = broker.RetryDelaySeconds;
         var attempt = 0;
         while (!cancellationToken.IsCancellationRequested)
         {
+            broker = _brokers.Desired ?? _brokers.Fallback;
             try
             {
-                Console.WriteLine($"Connecting {mqtt.ClientId} to {mqtt.Host}:{mqtt.Port}...");
-                await connection.ConnectAsync(cancellationToken);
+                Console.WriteLine($"Connecting {mqtt.ClientId} to broker {BrokerProfiles.Describe(broker)}...");
+                await connection.ConnectAsync(broker, cancellationToken);
                 Console.WriteLine("Connected.");
                 _host.Reset();
                 // Subscribe before the birth so the host's STATE and rebirth commands are not missed.
@@ -81,8 +85,10 @@ public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, Gate
                 await PublishNodeBirthAsync(cancellationToken);
                 if (!connection.MarkOnline())
                     throw new InvalidOperationException("Connection closed during the birth announcement.");
+                // Proven settings: the fallback for later failures and the restart default.
+                _brokers.MarkGood(broker);
                 attempt = 0;
-                delaySeconds = mqtt.RetryDelaySeconds;
+                delaySeconds = broker.RetryDelaySeconds;
                 await RunSessionAsync(cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -98,7 +104,7 @@ public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, Gate
             attempt++;
             Console.WriteLine($"Retry {attempt} in {delaySeconds}s. {outbox.CountUnsent()} message(s) buffered.");
             await Task.Delay(TimeSpan.FromSeconds(delaySeconds), cancellationToken);
-            delaySeconds = (int)Math.Min((long)delaySeconds * 2, mqtt.MaxRetryDelaySeconds);
+            delaySeconds = (int)Math.Min((long)delaySeconds * 2, broker.MaxRetryDelaySeconds);
         }
     }
 

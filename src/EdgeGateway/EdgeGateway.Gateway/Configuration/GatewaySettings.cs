@@ -8,8 +8,13 @@ public sealed class GatewaySettings
     public GatewayOutboxSettings Gateway { get; set; } = new();
 }
 
+// The client's own identity and state stay here. The broker itself (host to retry delays) comes from the
+// configuration registry row named by BrokerId; the values here are only the first-boot seed and last resort.
 public sealed class MqttSettings
 {
+    public string BrokerId { get; set; } = "local";
+    // How long new broker settings get to connect before the last working ones are restored.
+    public int BrokerTrialSeconds { get; set; } = 60;
     public string Host { get; set; } = "127.0.0.1";
     public int Port { get; set; } = 8883;
     public string ClientId { get; set; } = "gateway-01";
