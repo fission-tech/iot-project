@@ -169,7 +169,12 @@ public sealed class MqttConnection : IDisposable
         await PublishAsync(_deathTopic, SparkplugPayloads.NodeDeath(BirthDeathSequence).ToByteArray(),
             cancellationToken, MqttQualityOfServiceLevel.AtLeastOnce);
         Console.WriteLine($"Published NDEATH: {_deathTopic} (bdSeq {BirthDeathSequence})");
+        var handled = _disconnected.Task;
         await _client.DisconnectAsync(new MqttClientDisconnectOptionsBuilder().Build(), cancellationToken);
+        // The client reports the disconnect asynchronously. Wait for that handler, so it cannot run during the next
+        // connection (an immediate reconnect to switched broker settings) and abort it.
+        try { await handled.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken); }
+        catch (TimeoutException) { Console.WriteLine("Disconnect was not confirmed within 5s."); }
     }
 
     public async Task DisconnectAsync(CancellationToken cancellationToken)
