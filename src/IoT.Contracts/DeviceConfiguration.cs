@@ -77,7 +77,8 @@ public sealed record MetricDefinition(string Name, string Register, ushort Addre
 }
 
 // What data acquisition fetches: every enabled device, with a version that changes on every edit.
-public sealed record GatewayConfiguration(long Version, DeviceDefinition[] Devices)
+// Broker is present only when a gateway asks for its broker; older snapshots and caches have none.
+public sealed record GatewayConfiguration(long Version, DeviceDefinition[] Devices, BrokerProfile? Broker = null)
 {
     public void Validate()
     {
@@ -85,5 +86,6 @@ public sealed record GatewayConfiguration(long Version, DeviceDefinition[] Devic
         if (Devices.Any(device => device is null) || Devices.Select(device => device.Id).Distinct(StringComparer.Ordinal).Count() != Devices.Length)
             throw new ArgumentException("Snapshot devices must be non-null and have unique IDs.");
         foreach (var device in Devices) device.Validate();
+        Broker?.Validate();
     }
 }

@@ -12,6 +12,12 @@ if (args is ["--configuration-migrations-only"])
     return;
 }
 
+if (args is ["--broker-profile-only"])
+{
+    BrokerProfileChecks.Run();
+    return;
+}
+
 if (args is ["--broker-history-only"])
 {
     BrokerHistoryChecks.Run();
@@ -362,6 +368,7 @@ finally
 }
 
 await ModbusChecks.RunAsync();
+BrokerProfileChecks.Run();
 BrokerHistoryChecks.Run();
 DemoStatusChecks.Run();
 ConfigurationMigrationChecks.Run();
