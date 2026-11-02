@@ -41,7 +41,7 @@ Outbox has one new nullable foreign key, `BrokerHistoryId`, plus an index on it.
 1. An unexpected MQTT disconnect or failed initial connection attempt creates one history row. Further failures in the same outage reuse it.
 2. Existing polling continues. Outbox inserts attach the active history ID under the same lock used for storage and connection transitions. Timestamps are not used to guess message ownership.
 3. Successful MQTT connection closes that active interval and counts its Outbox messages before replay starts. Later live inserts have no history ID.
-4. After a QoS 1 publish completes, `MarkSent` conditionally marks the row sent and increments its history counter in the **same transaction** as published device state. Repeated handling of an already-sent or missing row does nothing.
+4. After a QoS 1 publish completes, `MarkSent` deletes the row (reading its history ID from the delete itself) and increments that history counter in the **same transaction** as published device state. Repeated handling of an already-deleted row does nothing.
 5. If another outage interrupts replay, remaining rows keep their original history ID. Acknowledging them later updates the original record.
 
 Both counters include buffered **DBIRTH, DDATA and DDEATH** messages. They count messages, not individual metrics. Automatically generated session NBIRTH/DBIRTH and live traffic outside the outage are excluded. This is why the counter is called `BufferedMessagesSent`: not every buffered lifecycle message carries Sparkplug's `is_historical` flag. Sparkplug payloads and historical flags are unchanged.
@@ -56,11 +56,11 @@ For example, outage 1 buffered 20 messages and sent 8 before a second outage. If
 - UTC times use the host's clock and reflect detection, not the exact instant a remote broker stopped. Downtime can be affected by host clock corrections; message ownership does not depend on the clock.
 - An ACK confirms broker acceptance, not subscriber processing. A crash after broker acceptance but before the SQLite commit can cause replay/duplicate delivery. The counter is one committed ACK transition per Outbox row, not proof of exactly-once delivery.
 - Connection-history write failures are logged and do not deliberately fail an otherwise successful MQTT connection. History can be incomplete if storage is unavailable. An ACK transaction failure keeps the Outbox row pending rather than partially committing its counter/state.
-- No new UI, API, retention policy, broker configuration, or Outbox deletion policy is added. Existing sent-row retention remains unchanged.
+- Acknowledged Outbox rows are deleted immediately; history rows and their totals are never deleted with them. Upgrading removes rows that older versions had already marked sent, so they are not published again.
 
-## Future ACK deletion
+## ACK deletion
 
-Deleting an already-acknowledged Outbox row does not remove its history row or totals. If `MarkSent` is changed to delete immediately on ACK, read the row's `BrokerHistoryId`, increment its counter, update published device state and delete the row **in one transaction**, only if it was still pending. Do not delete before looking up its history link, and do not cascade-delete history.
+`MarkSent` deletes the acknowledged row with `DELETE ... RETURNING BrokerHistoryId`, then increments that history counter and updates published device state **in one transaction**. If any part fails, the row stays pending. History is never cascade-deleted, so outage totals outlive the rows they counted.
 
 ## Inspect and demo
 
@@ -69,7 +69,7 @@ SELECT Id, DisconnectedAt, ReconnectedAt, DowntimeSeconds,
        MessagesBuffered, BufferedMessagesSent
 FROM BrokerHistory ORDER BY Id DESC;
 
-SELECT Id, Kind, DeviceId, BrokerHistoryId, SentAt
+SELECT Id, Kind, DeviceId, BrokerHistoryId
 FROM Outbox ORDER BY Id DESC LIMIT 50;
 ```
 
