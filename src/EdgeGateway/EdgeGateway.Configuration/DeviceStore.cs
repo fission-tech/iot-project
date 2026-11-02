@@ -79,12 +79,17 @@ public sealed class DeviceStore : IDisposable
     }
 
     // Resolve in one read transaction: cacheable polling definitions cannot mix old/new interface settings.
-    public GatewayConfiguration Snapshot()
+    public GatewayConfiguration Snapshot() => Snapshot(null)!;
+
+    // With a broker ID the snapshot also carries that broker; null when no such broker exists.
+    public GatewayConfiguration? Snapshot(string? brokerId)
     {
         lock (_gate)
         {
             using var transaction = _connection.BeginTransaction(deferred: true);
             var version = (long)Scalar("SELECT Value FROM Meta WHERE Key = 'Version'", transaction)!;
+            BrokerProfile? broker = null;
+            if (brokerId is not null && (broker = FindBroker(brokerId, transaction)) is null) return null;
             using var command = Command("""
                 SELECT d.Id, d.InterfaceId, d.Data, i.Type, i.Settings
                 FROM Devices d JOIN Interfaces i ON i.Id = d.InterfaceId ORDER BY d.Id
@@ -105,7 +110,7 @@ public sealed class DeviceStore : IDisposable
                 }
             }
             transaction.Commit();
-            return new(version, devices.ToArray());
+            return new(version, devices.ToArray(), broker);
         }
     }
 
@@ -173,6 +178,48 @@ public sealed class DeviceStore : IDisposable
 
     public bool Delete(string id) => DeleteRecord("Devices", id);
     public bool DeleteInterface(string id) => DeleteRecord("Interfaces", id);
+    public bool DeleteBroker(string id) => DeleteRecord("Brokers", id);
+
+    public BrokerProfile[] AllBrokers()
+    {
+        lock (_gate)
+        {
+            using var command = Command($"SELECT {BrokerColumns} FROM Brokers ORDER BY Id");
+            using var reader = command.ExecuteReader();
+            var brokers = new List<BrokerProfile>();
+            while (reader.Read()) brokers.Add(ReadBroker(reader));
+            return brokers.ToArray();
+        }
+    }
+
+    public BrokerProfile? FindBroker(string id)
+    {
+        lock (_gate) return FindBroker(id, null);
+    }
+
+    public bool SaveBroker(BrokerProfile broker, bool create)
+    {
+        broker.Validate();
+        lock (_gate)
+        {
+            using var transaction = _connection.BeginTransaction();
+            var exists = FindBroker(broker.Id, transaction) is not null;
+            if (exists == create) return false;
+            Execute($"""
+                INSERT INTO Brokers ({BrokerColumns}) VALUES ($id, $host, $port, $tls, $location, $sha, $keepAlive, $connect, $retry, $maxRetry)
+                ON CONFLICT(Id) DO UPDATE SET Host = excluded.Host, Port = excluded.Port, UseTls = excluded.UseTls,
+                    CertificateLocation = excluded.CertificateLocation, CertificateSha256 = excluded.CertificateSha256,
+                    KeepAliveSeconds = excluded.KeepAliveSeconds, ConnectTimeoutSeconds = excluded.ConnectTimeoutSeconds,
+                    RetryDelaySeconds = excluded.RetryDelaySeconds, MaxRetryDelaySeconds = excluded.MaxRetryDelaySeconds
+                """, transaction, ("$id", broker.Id), ("$host", broker.Host), ("$port", broker.Port), ("$tls", broker.UseTls),
+                ("$location", broker.CertificateLocation), ("$sha", broker.CertificateSha256?.ToLowerInvariant()),
+                ("$keepAlive", broker.KeepAliveSeconds), ("$connect", broker.ConnectTimeoutSeconds),
+                ("$retry", broker.RetryDelaySeconds), ("$maxRetry", broker.MaxRetryDelaySeconds));
+            BumpVersion(transaction);
+            transaction.Commit();
+            return true;
+        }
+    }
 
     private bool DeleteRecord(string table, string id)
     {
@@ -181,6 +228,9 @@ public sealed class DeviceStore : IDisposable
             using var transaction = _connection.BeginTransaction();
             if (table == "Interfaces" && Scalar("SELECT 1 FROM Devices WHERE InterfaceId = $id LIMIT 1", transaction, ("$id", id)) is not null)
                 throw new ConfigurationConflictException($"Interface {id} is used by registered devices. Reassign or remove those devices first.");
+            // Gateways choose their broker locally, so the registry cannot see which one is in use. Never leave none.
+            if (table == "Brokers" && FindBroker(id, transaction) is not null && (long)Scalar("SELECT COUNT(*) FROM Brokers", transaction)! == 1)
+                throw new ConfigurationConflictException($"Broker {id} is the only broker. Add another before removing it.");
             using var command = Command($"DELETE FROM {table} WHERE Id = $id", transaction, ("$id", id));
             if (command.ExecuteNonQuery() == 0) return false;
             BumpVersion(transaction);
@@ -196,6 +246,21 @@ public sealed class DeviceStore : IDisposable
         if (device.UnitId is < 1 or > 247) throw new ArgumentException($"Device {device.Id}: Modbus RTU Unit ID must be 1–247.");
         if (device.Enabled) throw new ArgumentException($"Device {device.Id}: Modbus RTU polling is not implemented yet. Save serial devices with enabled=false.");
     }
+
+    private const string BrokerColumns = "Id, Host, Port, UseTls, CertificateLocation, CertificateSha256, " +
+        "KeepAliveSeconds, ConnectTimeoutSeconds, RetryDelaySeconds, MaxRetryDelaySeconds";
+
+    private BrokerProfile? FindBroker(string id, SqliteTransaction? transaction)
+    {
+        using var command = Command($"SELECT {BrokerColumns} FROM Brokers WHERE Id = $id", transaction, ("$id", id));
+        using var reader = command.ExecuteReader();
+        return reader.Read() ? ReadBroker(reader) : null;
+    }
+
+    private static BrokerProfile ReadBroker(SqliteDataReader reader) =>
+        new(reader.GetString(0), reader.GetString(1), reader.GetInt32(2), reader.GetBoolean(3),
+            reader.IsDBNull(4) ? null : reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5),
+            reader.GetInt32(6), reader.GetInt32(7), reader.GetInt32(8), reader.GetInt32(9));
 
     private ModbusInterface? FindInterface(string id, SqliteTransaction? transaction)
     {

@@ -21,7 +21,9 @@ var store = app.Services.GetRequiredService<DeviceStore>();
 
 app.MapGet("/", () => "Edge gateway configuration service.");
 app.MapGet("/health", () => "ok");
-app.MapGet("/config", () => store.Snapshot());
+app.MapGet("/config", (string? broker) => store.Snapshot(broker) is { } snapshot
+    ? Results.Ok(snapshot)
+    : Results.NotFound(new { message = $"Broker {broker} does not exist." }));
 app.MapGet("/devices", () => store.All());
 app.MapGet("/devices/{id}", (string id) => store.Find(id) is { } device ? Results.Ok(device) : Results.NotFound());
 app.MapPost("/devices", (DeviceRegistration device) => Write(() => store.Save(device, create: true)
@@ -47,6 +49,17 @@ app.MapPut("/interfaces/{id}", (string id, ModbusInterface connection) => Write(
     ? Results.BadRequest(new { message = "The interface ID in the body must match the URL." })
     : store.SaveInterface(connection, create: false) ? Results.Ok(connection) : Results.NotFound()));
 app.MapDelete("/interfaces/{id}", (string id) => Write(() => store.DeleteInterface(id) ? Results.NoContent() : Results.NotFound()));
+
+// Broker connection settings. Gateways pick one with Mqtt:BrokerId and read it through GET /config?broker=.
+app.MapGet("/brokers", () => store.AllBrokers());
+app.MapGet("/brokers/{id}", (string id) => store.FindBroker(id) is { } broker ? Results.Ok(broker) : Results.NotFound());
+app.MapPost("/brokers", (BrokerProfile broker) => Write(() => store.SaveBroker(broker, create: true)
+    ? Results.Created($"/brokers/{broker.Id}", broker)
+    : Results.Conflict(new { message = $"Broker {broker.Id} already exists." })));
+app.MapPut("/brokers/{id}", (string id, BrokerProfile broker) => Write(() => broker.Id != id
+    ? Results.BadRequest(new { message = "The broker ID in the body must match the URL." })
+    : store.SaveBroker(broker, create: false) ? Results.Ok(broker) : Results.NotFound()));
+app.MapDelete("/brokers/{id}", (string id) => Write(() => store.DeleteBroker(id) ? Results.NoContent() : Results.NotFound()));
 
 Console.WriteLine($"Configuration service: {builder.Configuration["Configuration:Url"] ?? "http://127.0.0.1:5300"} ({store.All().Length} devices).");
 app.Run();

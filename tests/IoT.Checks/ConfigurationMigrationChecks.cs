@@ -31,7 +31,7 @@ internal static class ConfigurationMigrationChecks
             using (var store = new DeviceStore(fresh))
             {
                 Check(store.Snapshot() is { Version: 0, Devices.Length: 0 }, "fresh snapshot incorrect");
-                Check((long)Sql(fresh, "SELECT COUNT(*) FROM __EFMigrationsHistory")! == 1, "baseline not recorded");
+                Check((long)Sql(fresh, "SELECT COUNT(*) FROM __EFMigrationsHistory")! == 2, "baseline not recorded");
                 Check((long)Sql(fresh, "SELECT COUNT(*) FROM pragma_index_list('Devices') WHERE name='IX_Devices_InterfaceId'")! == 1, "FK index missing");
                 try { Sql(fresh, "INSERT INTO Interfaces VALUES('invalid','ModbusTcp','not-json');"); throw new Exception("Missing JSON constraint"); }
                 catch (SqliteException) { }
@@ -65,7 +65,7 @@ internal static class ConfigurationMigrationChecks
                 Check(store.Snapshot() is { Version: 17, Devices.Length: 1 }, "adoption reset config/version");
                 Check(store.Find("meter-01") is { InterfaceId: "tcp-01", UnitId: 1 }, "existing registration changed");
                 Check((string)Sql(existing, "SELECT Data FROM Devices WHERE Id='meter-01'")! == json, "adoption rewrote JSON");
-                Check((long)Sql(existing, "SELECT COUNT(*) FROM __EFMigrationsHistory")! == 1, "adoption not recorded");
+                Check((long)Sql(existing, "SELECT COUNT(*) FROM __EFMigrationsHistory")! == 2, "adoption not recorded");
                 Check(store.Save(store.Find("meter-01")! with { Enabled = false }, false), "existing device update failed");
                 Check(store.Snapshot().Version == 18, "version bump changed");
                 try { store.DeleteInterface("tcp-01"); throw new Exception("Referenced interface removed"); }

@@ -27,7 +27,32 @@ public sealed class ConfigurationDbContext(DbContextOptions<ConfigurationDbConte
             entity.HasKey(x => x.Key);
             entity.HasData(new ConfigurationMetadata { Key = "Version", Value = 0 });
         });
+        model.Entity<StoredBroker>(entity =>
+        {
+            entity.ToTable("Brokers", table => table.HasCheckConstraint("CK_Brokers_Port", "Port BETWEEN 1 AND 65535"));
+            entity.HasKey(x => x.Id);
+            // The broker every gateway used from appsettings before this table existed.
+            entity.HasData(new StoredBroker
+            {
+                Id = "local", Host = "127.0.0.1", Port = 8883, UseTls = true, CertificateLocation = "certs/broker.crt",
+                KeepAliveSeconds = 60, ConnectTimeoutSeconds = 10, RetryDelaySeconds = 2, MaxRetryDelaySeconds = 30
+            });
+        });
     }
+}
+
+public sealed class StoredBroker
+{
+    public string Id { get; set; } = "";
+    public string Host { get; set; } = "";
+    public int Port { get; set; }
+    public bool UseTls { get; set; }
+    public string? CertificateLocation { get; set; }
+    public string? CertificateSha256 { get; set; }
+    public int KeepAliveSeconds { get; set; }
+    public int ConnectTimeoutSeconds { get; set; }
+    public int RetryDelaySeconds { get; set; }
+    public int MaxRetryDelaySeconds { get; set; }
 }
 
 public sealed class StoredInterface

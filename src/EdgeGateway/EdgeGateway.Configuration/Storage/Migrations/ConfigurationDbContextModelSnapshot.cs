@@ -36,6 +36,61 @@ namespace EdgeGateway.Configuration.Storage.Migrations
                         });
                 });
 
+            modelBuilder.Entity("EdgeGateway.Configuration.Storage.StoredBroker", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CertificateLocation")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CertificateSha256")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("ConnectTimeoutSeconds")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Host")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("KeepAliveSeconds")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("MaxRetryDelaySeconds")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("Port")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("RetryDelaySeconds")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("UseTls")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("Brokers", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_Brokers_Port", "Port BETWEEN 1 AND 65535");
+                        });
+
+                    b.HasData(
+                        new
+                        {
+                            Id = "local",
+                            CertificateLocation = "certs/broker.crt",
+                            ConnectTimeoutSeconds = 10,
+                            Host = "127.0.0.1",
+                            KeepAliveSeconds = 60,
+                            MaxRetryDelaySeconds = 30,
+                            Port = 8883,
+                            RetryDelaySeconds = 2,
+                            UseTls = true
+                        });
+                });
+
             modelBuilder.Entity("EdgeGateway.Configuration.Storage.StoredConfigurationDevice", b =>
                 {
                     b.Property<string>("Id")

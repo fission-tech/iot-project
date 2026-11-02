@@ -55,6 +55,51 @@ internal static class BrokerProfileChecks
             "snapshot with invalid broker settings was accepted");
 
         Console.WriteLine("PASS: Broker profile: valid defaults, file/https certificates with SHA-256 pins, port/ID/timing limits, TLS consistency, JSON round trip, unknown-field refusal and snapshots without broker settings.");
+        RunStore();
+    }
+
+    // The registry's Brokers table: seeded broker, edits with version bumps, invalid saves and deleting the last broker.
+    private static void RunStore()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "broker-store-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var path = Path.Combine(directory, "configuration.db");
+            using (var store = new EdgeGateway.Configuration.DeviceStore(path))
+            {
+                Check(store.AllBrokers().Single() == Broker(), "migration did not seed today's broker as 'local'");
+                Check(store.Snapshot() is { Version: 0, Broker: null }, "snapshot without broker ID changed");
+                Check(store.Snapshot("local") is { Version: 0, Broker: { } seeded } && seeded == Broker(), "snapshot did not carry the broker");
+                Check(store.Snapshot("missing") is null, "unknown broker was not reported");
+
+                Check(!store.SaveBroker(Broker(), create: true), "duplicate broker created");
+                var moved = Broker() with { Port = 18883, CertificateSha256 = Fingerprint.ToUpperInvariant() };
+                Check(store.SaveBroker(moved, create: false), "broker update failed");
+                Check(store.FindBroker("local") == moved with { CertificateSha256 = Fingerprint }, "fingerprint not stored in lower case");
+                Check(store.Snapshot("local")!.Version == 1, "broker edit did not bump the version");
+                Check(!store.SaveBroker(Broker() with { Id = "absent" }, create: false), "update of a missing broker succeeded");
+
+                Reject(() => store.SaveBroker(Broker() with { Port = 0 }, create: false), "invalid port saved");
+                Reject(() => store.SaveBroker(Broker() with { CertificateLocation = "http://x/broker.crt", CertificateSha256 = Fingerprint }, create: false), "http certificate saved");
+                Check(store.FindBroker("local")!.Port == 18883 && store.Snapshot().Version == 1, "a refused save changed data or the version");
+
+                try { store.DeleteBroker("local"); throw new Exception("Broker profile: the only broker was deleted"); }
+                catch (EdgeGateway.Configuration.ConfigurationConflictException) { }
+                Check(store.SaveBroker(Broker() with { Id = "cloud", Host = "broker.example.com" }, create: true), "second broker not created");
+                Check(store.DeleteBroker("local") && store.AllBrokers().Single().Id == "cloud", "broker delete failed");
+                Check(!store.DeleteBroker("local"), "deleting a missing broker reported success");
+                Check(store.Snapshot().Version == 3, "create/delete did not bump the version");
+            }
+            using (var store = new EdgeGateway.Configuration.DeviceStore(path))
+                Check(store.FindBroker("cloud")?.Host == "broker.example.com", "broker settings did not survive a restart");
+            Console.WriteLine("PASS: Brokers table: migration seed, snapshot with/without broker, unknown broker, create/update/delete with version bumps, lower-case fingerprints, refused invalid saves and protected last broker.");
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(directory, recursive: true);
+        }
     }
 
     private static bool Throws(Action action)
