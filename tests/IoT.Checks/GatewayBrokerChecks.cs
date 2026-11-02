@@ -24,9 +24,10 @@ internal static class GatewayBrokerChecks
         try
         {
             CheckProfiles(directory);
+            CheckSelector(directory);
             await CheckCertificatesAsync(directory);
             await CheckMissingBrokerAsync(directory);
-            Console.WriteLine("PASS: Gateway broker settings: appsettings seed, registry offer/validation, last-good persistence and corrupt-file fallback, pinned file certificates, cached URL certificates, mismatch refusal, and device updates when the broker is missing.");
+            Console.WriteLine("PASS: Gateway broker settings: appsettings seed, registry offer/validation, trial window, rollback with rejection, alternation while the broker is down, fresh trial after a change, last-good persistence and corrupt-file fallback, pinned file certificates, cached URL certificates, mismatch refusal, and device updates when the broker is missing.");
         }
         finally { Directory.Delete(directory, recursive: true); }
     }
@@ -61,6 +62,62 @@ internal static class GatewayBrokerChecks
 
         File.WriteAllText(Path.Combine(settings.StateDirectory, "broker-last-good.json"), "{ not json");
         Check(new BrokerProfiles(settings).Fallback == profiles.Seed, "a corrupt last-good file did not fall back to the seed");
+    }
+
+    private static void CheckSelector(string directory)
+    {
+        var profiles = new BrokerProfiles(Settings(Path.Combine(directory, "selector")));
+        var selector = new BrokerSelector(profiles, TimeSpan.FromSeconds(60));
+        var start = DateTimeOffset.Parse("2026-11-02T10:00:00Z");
+        var seed = profiles.Seed;
+
+        // No registry settings yet: the seed, and once it connects it becomes the last working settings.
+        Check(selector.Next(start) == seed, "first boot did not use the seed");
+        selector.Connected(seed);
+        Check(selector.State(seed, null).Source == "last-good" || profiles.LastGood != seed, "seed not recorded as working");
+        Check(profiles.LastGood == seed, "seed not recorded as working");
+        profiles.Offer(seed);
+        Check(!selector.ShouldSwitch(seed) && selector.Next(start) == seed, "identical registry settings caused a switch");
+
+        // Good new settings: tried at once and adopted.
+        var moved = seed with { Port = 1884 };
+        profiles.Offer(moved);
+        Check(selector.ShouldSwitch(seed), "changed registry settings did not request a switch");
+        Check(selector.Next(start) == moved && selector.State(seed, null).Trying == moved, "new settings not on trial");
+        selector.Connected(moved);
+        Check(profiles.LastGood == moved && selector.State(moved, null) is { Source: "registry", Trying: null }, "working new settings not adopted");
+
+        // Wrong settings: only they are tried for the window, then the fallback restores service and rejects them.
+        var wrong = moved with { Port = 9 };
+        profiles.Offer(wrong);
+        Check(selector.Next(start) == wrong, "wrong settings not tried first");
+        selector.Failed(wrong, "Connection refused");
+        Check(selector.Next(start.AddSeconds(59)) == wrong, "fallback used before the trial window ended");
+        Check(selector.Next(start.AddSeconds(61)) == moved, "fallback not tried after the trial window");
+        selector.Connected(moved);
+        var state = selector.State(moved, null);
+        Check(state.Rejected == wrong && state.RejectedReason == "Connection refused" && state.Source == "last-good", "failed settings not rejected with their error");
+        Check(!selector.ShouldSwitch(moved) && selector.Next(start.AddSeconds(62)) == moved, "rejected settings were tried again");
+        Check(profiles.LastGood == moved, "rejected settings replaced the last working ones");
+
+        // A changed broker while it is down: both are tried in turn and whichever connects first wins, without rejecting.
+        var fixedPort = moved with { Port = 1885 };
+        profiles.Offer(fixedPort);
+        Check(selector.State(moved, null).Rejected is null, "old rejection kept after the registry moved on");
+        var later = start.AddMinutes(10);
+        Check(selector.Next(later) == fixedPort, "new settings not tried first");
+        var turns = new[] { selector.Next(later.AddSeconds(61)), selector.Next(later.AddSeconds(62)), selector.Next(later.AddSeconds(63)) };
+        Check(turns.SequenceEqual([moved, fixedPort, moved]), "settings were not tried in turn after the window");
+        selector.Connected(fixedPort);
+        Check(profiles.LastGood == fixedPort && selector.State(fixedPort, null).Rejected is null, "settings that connected late were not adopted");
+
+        // Saving previously rejected values again later earns a fresh trial.
+        profiles.Offer(wrong);
+        Check(selector.ShouldSwitch(fixedPort) && selector.Next(later.AddMinutes(5)) == wrong, "re-saved settings were not tried again");
+
+        // The registry dropping this broker keeps the working connection.
+        profiles.Offer(null);
+        Check(!selector.ShouldSwitch(fixedPort) && selector.Next(later.AddMinutes(6)) == fixedPort, "a removed registry broker disturbed the connection");
     }
 
     private static async Task CheckCertificatesAsync(string directory)

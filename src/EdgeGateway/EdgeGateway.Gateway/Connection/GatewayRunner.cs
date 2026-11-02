@@ -9,8 +9,12 @@ namespace EdgeGateway.Gateway.Connection;
 
 public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, GatewaySettings settings, BrokerProfiles? brokers = null)
 {
-    private readonly BrokerProfiles _brokers = brokers ?? new BrokerProfiles(settings.Mqtt);
+    // Initializers run in order: the first one settles the shared instance the selector then uses.
+    private readonly BrokerProfiles _brokers = brokers ??= new BrokerProfiles(settings.Mqtt);
+    private readonly BrokerSelector _selector = new(brokers, TimeSpan.FromSeconds(settings.Mqtt.BrokerTrialSeconds));
+    private readonly SemaphoreSlim _brokerChanged = new(0, 1);
     public BrokerProfiles Brokers => _brokers;
+    public BrokerState BrokerState => _selector.State(connection.Broker, connection.CertificateExpires);
     private readonly PrimaryHostState _host = new();
     private int _rebirthRequested;
     private readonly long _startedAt = Stopwatch.GetTimestamp();
@@ -36,9 +40,11 @@ public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, Gate
             }
         }
         connection.ConnectivityChanged += RecordConnectivity;
+        _brokers.Changed += SignalBrokerChange;
         try { await RunConnectionLoopAsync(cancellationToken); }
         finally
         {
+            _brokers.Changed -= SignalBrokerChange;
             connection.ConnectivityChanged -= RecordConnectivity;
             outbox.EndBrokerObservation();
         }
@@ -59,12 +65,13 @@ public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, Gate
             else if (topic == commandTopic) RequestRebirth(payload);
             return Task.CompletedTask;
         };
-        var broker = _brokers.Desired ?? _brokers.Fallback;
+        var broker = _selector.Next(DateTimeOffset.UtcNow);
         var delaySeconds = broker.RetryDelaySeconds;
         var attempt = 0;
         while (!cancellationToken.IsCancellationRequested)
         {
-            broker = _brokers.Desired ?? _brokers.Fallback;
+            broker = _selector.Next(DateTimeOffset.UtcNow);
+            var switching = false;
             try
             {
                 Console.WriteLine($"Connecting {mqtt.ClientId} to broker {BrokerProfiles.Describe(broker)}...");
@@ -86,10 +93,10 @@ public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, Gate
                 if (!connection.MarkOnline())
                     throw new InvalidOperationException("Connection closed during the birth announcement.");
                 // Proven settings: the fallback for later failures and the restart default.
-                _brokers.MarkGood(broker);
+                _selector.Connected(broker);
                 attempt = 0;
                 delaySeconds = broker.RetryDelaySeconds;
-                await RunSessionAsync(cancellationToken);
+                switching = await RunSessionAsync(cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -98,9 +105,12 @@ public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, Gate
             catch (Exception error)
             {
                 Console.WriteLine($"Connection failed: {error.Message}");
+                _selector.Failed(broker, error.Message);
             }
             cancellationToken.ThrowIfCancellationRequested();
+            // Ends with NDEATH and an intentional disconnect, so a switch is not recorded as a broker outage.
             await connection.PrepareRetryAsync(cancellationToken);
+            if (switching) continue; // New settings are tried at once; readings wait in the outbox meanwhile.
             attempt++;
             Console.WriteLine($"Retry {attempt} in {delaySeconds}s. {outbox.CountUnsent()} message(s) buffered.");
             await Task.Delay(TimeSpan.FromSeconds(delaySeconds), cancellationToken);
@@ -122,19 +132,39 @@ public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, Gate
         }
     }
 
-    private async Task RunSessionAsync(CancellationToken cancellationToken)
+    private void SignalBrokerChange()
+    {
+        try { _brokerChanged.Release(); }
+        catch (SemaphoreFullException) { }
+    }
+
+    // Completes when the registry asks for broker settings other than the ones this session uses.
+    private async Task WaitForBrokerSwitchAsync(CancellationToken cancellationToken)
+    {
+        while (!_selector.ShouldSwitch(connection.Broker)) await _brokerChanged.WaitAsync(cancellationToken);
+    }
+
+    // Returns true when the session ended to switch to new broker settings.
+    private async Task<bool> RunSessionAsync(CancellationToken cancellationToken)
     {
         using var session = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var disconnected = connection.WaitForDisconnectAsync(session.Token);
         var hostOffline = _host.WentOffline;
+        var switching = WaitForBrokerSwitchAsync(session.Token);
         var publishing = DrainAsync(session.Token);
         try
         {
-            var finished = await Task.WhenAny(disconnected, publishing, hostOffline);
+            var finished = await Task.WhenAny(disconnected, publishing, hostOffline, switching);
             if (finished == publishing) await publishing;
             else if (finished == hostOffline)
                 Console.WriteLine("Primary host went offline. Ending session and buffering until it returns.");
+            else if (finished == switching)
+            {
+                Console.WriteLine("Broker settings changed in the registry. Ending this session to switch.");
+                return true;
+            }
             else await disconnected;
+            return false;
         }
         finally
         {
