@@ -7,7 +7,7 @@ namespace EdgeGateway.Gateway.Storage;
 
 public sealed record OutboxRow(long Id, string Kind, string DeviceId, DeviceReading? Reading, DateTimeOffset CreatedAt);
 
-// Polled readings are committed before publishing and marked sent only after the broker's PUBACK.
+// Polled readings are committed before publishing and deleted only after the broker's PUBACK.
 public sealed partial class Outbox : IDisposable
 {
     private readonly SqliteConnection _connection;
@@ -103,7 +103,7 @@ public sealed partial class Outbox : IDisposable
         {
             using var command = Command("""
                 SELECT Id, Kind, DeviceId, Reading, CreatedAt FROM Outbox
-                WHERE SentAt IS NULL ORDER BY Id LIMIT $limit
+                ORDER BY Id LIMIT $limit
                 """, null, ("$limit", limit));
             using var reader = command.ExecuteReader();
             var rows = new List<OutboxRow>();
@@ -115,20 +115,25 @@ public sealed partial class Outbox : IDisposable
         }
     }
 
-    // Records the last broker-acknowledged device state for births in the next MQTT session.
+    // Deletes the acknowledged row and records the last broker-acknowledged device state for births in the
+    // next MQTT session, in one transaction.
     public void MarkSent(OutboxRow row)
     {
         lock (_gate)
         {
             using var transaction = _connection.BeginTransaction();
-            // The conditional transition makes repeated ACK handling a no-op, including its history count.
-            if (Execute("UPDATE Outbox SET SentAt = $now WHERE Id = $id AND SentAt IS NULL", transaction,
-                    ("$now", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()), ("$id", row.Id)) == 0)
-                return;
-            Execute("""
-                UPDATE BrokerHistory SET BufferedMessagesSent = BufferedMessagesSent + 1
-                WHERE Id = (SELECT BrokerHistoryId FROM Outbox WHERE Id = $id)
-                """, transaction, ("$id", row.Id));
+            // The history link is read by the delete itself; a repeated ACK finds no row and changes nothing.
+            long? historyId;
+            using (var delete = Command("DELETE FROM Outbox WHERE Id = $id RETURNING BrokerHistoryId", transaction,
+                       ("$id", row.Id)))
+            using (var reader = delete.ExecuteReader())
+            {
+                if (!reader.Read()) return;
+                historyId = reader.IsDBNull(0) ? null : reader.GetInt64(0);
+            }
+            if (historyId is { } id)
+                Execute("UPDATE BrokerHistory SET BufferedMessagesSent = BufferedMessagesSent + 1 WHERE Id = $history",
+                    transaction, ("$history", id));
             if (row.Kind == "DDEATH")
                 Execute("UPDATE Devices SET PublishedOnline = 0 WHERE DeviceId = $device", transaction, ("$device", row.DeviceId));
             else
@@ -153,15 +158,7 @@ public sealed partial class Outbox : IDisposable
 
     public long CountUnsent()
     {
-        lock (_gate) return (long)Scalar("SELECT COUNT(*) FROM Outbox WHERE SentAt IS NULL")!;
-    }
-
-    // Keep sent rows temporarily so repeated reading numbers are still recognized.
-    public void PruneSent(TimeSpan keep)
-    {
-        lock (_gate)
-            Execute("DELETE FROM Outbox WHERE SentAt IS NOT NULL AND SentAt < $cutoff", null,
-                ("$cutoff", DateTimeOffset.UtcNow.Subtract(keep).ToUnixTimeMilliseconds()));
+        lock (_gate) return (long)Scalar("SELECT COUNT(*) FROM Outbox")!;
     }
 
     public async Task WaitForRowsAsync(TimeSpan timeout, CancellationToken cancellationToken) =>

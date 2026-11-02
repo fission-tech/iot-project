@@ -148,7 +148,6 @@ public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, Gate
         await PublishDeviceBirthsAsync(sequence, cancellationToken);
         var nodeDataInterval = TimeSpan.FromSeconds(settings.Gateway.NodeDataIntervalSeconds);
         var nextNodeData = DateTime.UtcNow + nodeDataInterval;
-        var nextPrune = DateTime.UtcNow;
         var announcedBacklog = false;
         var nodeTopic = SparkplugTopics.NodeData(settings.Sparkplug);
 
@@ -168,11 +167,6 @@ public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, Gate
                 await connection.PublishAsync(nodeTopic, SparkplugPayloads.NodeData(current, UptimeSeconds).ToByteArray(),
                     cancellationToken, MqttQualityOfServiceLevel.AtLeastOnce);
                 nextNodeData = DateTime.UtcNow + nodeDataInterval;
-            }
-            if (DateTime.UtcNow >= nextPrune)
-            {
-                outbox.PruneSent(TimeSpan.FromHours(settings.Gateway.KeepSentHours));
-                nextPrune = DateTime.UtcNow.AddHours(1);
             }
 
             var rows = outbox.PeekUnsent(settings.Gateway.PublishBatchSize);

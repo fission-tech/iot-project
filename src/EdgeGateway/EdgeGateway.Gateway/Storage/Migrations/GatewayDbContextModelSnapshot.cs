@@ -98,16 +98,9 @@ namespace EdgeGateway.Gateway.Storage.Migrations
                     b.Property<string>("Reading")
                         .HasColumnType("TEXT");
 
-                    b.Property<long?>("SentAt")
-                        .HasColumnType("INTEGER");
-
                     b.HasKey("Id");
 
                     b.HasIndex("BrokerHistoryId");
-
-                    b.HasIndex("Id")
-                        .HasDatabaseName("IX_Outbox_Unsent")
-                        .HasFilter("SentAt IS NULL");
 
                     b.HasIndex("DeviceId", "DeviceSeq")
                         .IsUnique();

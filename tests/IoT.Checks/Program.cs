@@ -348,7 +348,7 @@ try
         var rows = reopened.PeekUnsent(10);
         Check(rows.Length == 2 && rows[0].Kind == "DDEATH" && rows[1].Reading!.DeviceSeq == 3,
             "Unsent rows did not survive a restart in order.");
-        Check(!reopened.AcceptReading(Reading(1)), "Restart forgot already buffered readings.");
+        Check(!reopened.AcceptReading(Reading(3)), "Restart forgot readings still waiting to be sent.");
         reopened.MarkSent(rows[0]);
         Check(reopened.GetPublishedOnlineDevices().Length == 0, "Device death did not update published state.");
         Check(reopened.CountUnsent() == 1, "Unsent count is wrong.");

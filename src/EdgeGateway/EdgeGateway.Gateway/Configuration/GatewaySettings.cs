@@ -35,5 +35,4 @@ public sealed class GatewayOutboxSettings
     public string DatabasePath { get; set; } = Path.Combine(AppContext.BaseDirectory, "state", "gateway", "outbox.db");
     public int PublishBatchSize { get; set; } = 50;
     public int NodeDataIntervalSeconds { get; set; } = 30;
-    public int KeepSentHours { get; set; } = 24;
 }

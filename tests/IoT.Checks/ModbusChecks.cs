@@ -419,7 +419,8 @@ internal static class ModbusChecks
             {
                 var beforeCache = Rows("keep").Length;
                 await WaitFor(() => Rows("keep").Length > beforeCache, task, "Cached startup did not resume enabled polling.");
-                Check(Deaths("disabled") == 1 && Deaths("deleted") == 1 && Deaths("storage") == 1, "Restart duplicated offline transitions.");
+                // Acknowledged deaths were deleted and must not be queued again; the unacknowledged one stays once.
+                Check(Deaths("disabled") == 0 && Deaths("deleted") == 0 && Deaths("storage") == 1, "Restart duplicated offline transitions.");
                 Volatile.Write(ref snapshot, new(3, []));
                 await WaitFor(() => Deaths("keep") == 1, task, "A valid empty registry did not stop the active device.");
                 var afterDisable = Rows("keep").Length;

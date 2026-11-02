@@ -55,16 +55,18 @@ internal static class BrokerHistoryChecks
             catch (InvalidOperationException error) when (error.Message.Contains("pre-EF schema")) { }
             Check(Number(legacyPath, "SELECT COUNT(*) FROM sqlite_master WHERE name='Outbox'") == 1, "legacy guard deleted data");
 
-            // Apply the baseline migration, insert pending data, then let startup apply BrokerHistory.
+            // Apply the baseline migration, insert pending and acknowledged data, then let startup apply the rest.
             using (var database = new GatewayDbContextFactory().CreateDbContext([path]))
                 database.GetService<IMigrator>().Migrate("InitializeGatewayRuntime");
             Sql(path, """
                 INSERT INTO Outbox(Kind,DeviceId,CreatedAt) VALUES('DDEATH','old-device',0);
+                INSERT INTO Outbox(Kind,DeviceId,CreatedAt,SentAt) VALUES('DDEATH','acknowledged-device',0,1);
                 """);
             using (var box = new Outbox(path))
             {
-                Check(box.CountUnsent() == 1, "schema upgrade lost old data");
-                Check(Number(path, "SELECT COUNT(*) FROM __EFMigrationsHistory") == 2, "migrations not recorded");
+                Check(box.CountUnsent() == 1 && box.PeekUnsent(10).Single().DeviceId == "old-device",
+                    "schema upgrade lost pending data or kept acknowledged rows for republishing");
+                Check(Number(path, "SELECT COUNT(*) FROM __EFMigrationsHistory") == 3, "migrations not recorded");
                 Check(Number(path, "SELECT COUNT(*) FROM pragma_index_list('Outbox') WHERE name='IX_Outbox_BrokerHistoryId'") == 1, "history index missing");
                 box.RecordBrokerConnected(time);
                 Check(Number(path, "SELECT COUNT(*) FROM BrokerHistory") == 0, "normal startup created an outage");
@@ -104,8 +106,8 @@ internal static class BrokerHistoryChecks
                 box.AcceptReading(Reading(4)); // Live traffic is excluded.
                 box.MarkSent(box.PeekUnsent(10).Single());
                 Check(Number(path, "SELECT BufferedMessagesSent FROM BrokerHistory WHERE Id=2") == 1, "live message counted");
-                // Simulate the future retention/deletion task AFTER the atomic ACK commit.
-                Sql(path, "DELETE FROM Outbox WHERE SentAt IS NOT NULL;");
+                // The ACK deleted the row; history keeps its totals and a late repeated ACK changes nothing.
+                Check(Number(path, "SELECT COUNT(*) FROM Outbox") == 0, "acknowledged rows were not deleted");
                 box.MarkSent(pending);
                 Check(Number(path, "SELECT SUM(BufferedMessagesSent) FROM BrokerHistory") == 4, "deletion lost/duplicated totals");
 
@@ -114,7 +116,7 @@ internal static class BrokerHistoryChecks
             } // Simulate a crash: no EndBrokerObservation call.
             using (var box = new Outbox(path))
             {
-                Check(Number(path, "SELECT COUNT(*) FROM __EFMigrationsHistory") == 2, "repeat startup reran migration");
+                Check(Number(path, "SELECT COUNT(*) FROM __EFMigrationsHistory") == 3, "repeat startup reran migration");
                 box.RecordBrokerConnected(time.AddHours(1));
                 Check(Sql(path, "SELECT ReconnectedAt FROM BrokerHistory WHERE Id=3") is DBNull, "restart fabricated recovery");
                 box.AcceptReading(Reading(6));
@@ -147,10 +149,10 @@ internal static class BrokerHistoryChecks
                 Check(Number(path, "SELECT COUNT(*) FROM __EFMigrationsHistory") == 1, "rollback failed");
                 Check(Number(path, "SELECT COUNT(*) FROM Outbox") == pendingBefore, "rollback lost Outbox messages");
                 database.Database.Migrate();
-                Check(Number(path, "SELECT COUNT(*) FROM __EFMigrationsHistory") == 2, "reapply failed");
+                Check(Number(path, "SELECT COUNT(*) FROM __EFMigrationsHistory") == 3, "reapply failed");
             }
-            Console.WriteLine("PASS: Broker history migration, UTC/downtime, retry deduplication, birth/data/death counts, multiple outages, atomic ACK rollback, repeated ACKs, deletion retention, interrupted restart and concurrent polling.");
-            Console.WriteLine("PASS: EF migrations: fresh baseline, data-preserving history upgrade, repeat startup, migration ledger/index, model snapshot, rollback/reapply and explicit pre-EF reset requirement.");
+            Console.WriteLine("PASS: Broker history migration, UTC/downtime, retry deduplication, birth/data/death counts, multiple outages, atomic ACK rollback, repeated ACKs, delete on ACK, interrupted restart and concurrent polling.");
+            Console.WriteLine("PASS: EF migrations: fresh baseline, data-preserving history upgrade, acknowledged rows removed with SentAt, repeat startup, migration ledger/index, model snapshot, rollback/reapply and explicit pre-EF reset requirement.");
         }
         finally { Directory.Delete(directory, recursive: true); }
     }

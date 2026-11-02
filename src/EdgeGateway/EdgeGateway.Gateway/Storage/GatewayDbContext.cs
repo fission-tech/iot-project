@@ -23,7 +23,6 @@ public sealed class GatewayDbContext(DbContextOptions<GatewayDbContext> options)
             entity.Property(x => x.Kind).IsRequired();
             entity.Property(x => x.DeviceId).IsRequired();
             entity.HasIndex(x => new { x.DeviceId, x.DeviceSeq }).IsUnique();
-            entity.HasIndex(x => x.Id).HasDatabaseName("IX_Outbox_Unsent").HasFilter("SentAt IS NULL");
             entity.HasOne<BrokerHistoryRecord>().WithMany().HasForeignKey(x => x.BrokerHistoryId)
                 .OnDelete(DeleteBehavior.Restrict);
         });
@@ -54,7 +53,6 @@ public sealed class StoredOutboxMessage
     public long? DeviceSeq { get; set; }
     public string? Reading { get; set; }
     public long CreatedAt { get; set; }
-    public long? SentAt { get; set; }
     public long? BrokerHistoryId { get; set; }
 }
 
