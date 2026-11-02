@@ -49,7 +49,7 @@ Root `appsettings.json` (ignored by Git) holds shared settings; the settings cla
 
 ```json
 {
-  "Sparkplug": { "GroupId": "warehouse-01", "EdgeNodeId": "gateway-01", "HostId": "" },
+  "Sparkplug": { "GroupId": "warehouse-01", "EdgeNodeId": "gateway-01" },
   "Mqtt": { "BrokerId": "local", "ClientId": "gateway-01", "Host": "127.0.0.1", "Port": 8883, "UseTls": true, "BrokerCertificatePath": "certs/broker.crt" }
 }
 ```

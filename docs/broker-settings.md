@@ -8,7 +8,8 @@ The MQTT broker the gateway publishes to is stored in the configuration service'
 |---|---|---|
 | Host, port, TLS, certificate location and fingerprint | `Brokers` table | Shared by every gateway on that broker; changed centrally |
 | Keep-alive, connect timeout, retry delays | `Brokers` table | How to talk to that broker |
-| Which broker to use: `Mqtt:BrokerId` (default `local`) | gateway `appsettings.json` | The gateway needs it before it can read the registry |
+| Which broker a gateway uses | `GatewayBrokers` table (gateway ID = its MQTT client ID) | Switch one gateway live from the console |
+| Default broker when a gateway has no assignment: `Mqtt:BrokerId` (default `local`) | gateway `appsettings.json` | Works before the registry is reachable |
 | Client ID, Sparkplug group/node/host IDs | gateway `appsettings.json` | The gateway's identity; changing it remotely would make it appear as a different node |
 | `Mqtt:Host`, `Port`, `UseTls`, `BrokerCertificatePath`, timing keys | gateway `appsettings.json` | First-boot seed and last resort only |
 | `Mqtt:BrokerTrialSeconds` (default 60) | gateway `appsettings.json` | How long new settings get before the last working ones are restored |
@@ -29,8 +30,11 @@ The `AddBrokers` migration creates the table and seeds `local`: `127.0.0.1:8883`
 | `GET /brokers`, `GET /brokers/{id}` | list, one |
 | `POST /brokers` | create; 409 if the ID exists |
 | `PUT /brokers/{id}` | update; 400 if invalid, 404 if missing |
-| `DELETE /brokers/{id}` | remove; 409 for the only broker |
-| `GET /config?broker={id}` | devices plus that broker in one consistent snapshot; 404 for an unknown broker. Without `broker` the response is unchanged. |
+| `DELETE /brokers/{id}` | remove; 409 for the only broker or one assigned to a gateway |
+| `GET /gateways` | all gateway → broker assignments |
+| `PUT /gateways/{id}` `{"gatewayId","brokerId"}` | assign that gateway a broker; 400 for an unknown broker |
+| `DELETE /gateways/{id}` | remove the assignment: the gateway goes back to its own `Mqtt:BrokerId` |
+| `GET /config?broker={id}&gateway={id}` | devices plus the gateway's broker in one consistent snapshot: its assignment if it has one, else the named broker (404 if that does not exist). Without either, the response is unchanged. |
 
 Every change bumps the configuration version, so gateways pick it up on their next refresh (every 10 s).
 
@@ -59,7 +63,7 @@ and remove the colons (the console form removes them for you).
 ## How the gateway chooses and switches
 
 Which settings a connection attempt uses:
-1. the registry's broker (named by `Mqtt:BrokerId`)
+1. the registry's broker: the one assigned to this gateway, else the one named by `Mqtt:BrokerId`
 2. else the **last working** settings: `state/gateway/broker-last-good.json`, written only after a connection published its NBIRTH
 3. else the appsettings seed
 
@@ -100,3 +104,12 @@ Anyone who can write to the configuration service can point gateways at another 
 1. **Broker** tab → **Edit** `local` → set port `8884` → **Save**. Within about 10 s the gateway shows *trying 127.0.0.1:8884*; the gateway card shows it was last connected to 8883.
 2. About 60–80 s later it shows *rejected* with the connection error and runs on 8883 again (*last working settings*). The registry row is marked *gateway still on earlier values*.
 3. Set the port back to `8883` and save: no reconnect is needed, and the rejection clears.
+
+## Two ways to move a gateway
+
+| What happened | Do this | Affects |
+|---|---|---|
+| The broker itself moved (new IP, port or certificate) | **Edit** that broker | every gateway using it |
+| This gateway should use another broker | Broker tab → **Gateway … uses broker** dropdown | only this gateway |
+
+Choosing *its own setting* in the dropdown removes the assignment, and the gateway returns to its `Mqtt:BrokerId`. Both ways switch live with the same trial and rollback.
