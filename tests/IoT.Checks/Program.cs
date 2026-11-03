@@ -6,6 +6,12 @@ using Org.Eclipse.Tahu.Protobuf;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 
+if (args is ["--frame-isolation-only"])
+{
+    await FrameIsolationChecks.RunAsync();
+    return;
+}
+
 if (args is ["--configuration-migrations-only"])
 {
     ConfigurationMigrationChecks.Run();
@@ -370,6 +376,7 @@ finally
 await ModbusChecks.RunAsync();
 BrokerProfileChecks.Run();
 await GatewayBrokerChecks.RunAsync();
+await FrameIsolationChecks.RunAsync();
 BrokerHistoryChecks.Run();
 DemoStatusChecks.Run();
 ConfigurationMigrationChecks.Run();

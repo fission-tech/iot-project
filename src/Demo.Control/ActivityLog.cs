@@ -47,7 +47,7 @@ public sealed partial class ActivityLog
                 report = !_lastFailure.TryGetValue(device, out var previous) || previous != reason;
                 _lastFailure[device] = reason;
             }
-            if (report) Add("gateway", "fail", $"{device}: poll failed: {reason}");
+            if (report) Add("gateway", "fail", $"{device}: read error: {reason}");
         }
         else if (DeviceOnline().Match(line) is { Success: true } online)
         {
@@ -70,7 +70,7 @@ public sealed partial class ActivityLog
     private static partial Regex ConfigLoaded();
     [GeneratedRegex(@"^Polling (\S+) at (\S+) every \S+ in (.+)\.$")]
     private static partial Regex PollingStarted();
-    [GeneratedRegex(@"^Poll (\S+) failed \((.+)\), \d+ in a row\.$")]
+    [GeneratedRegex(@"^Poll (\S+): (.+); \d+ consecutive communication failure\(s\)\.$")]
     private static partial Regex PollFailed();
     [GeneratedRegex(@"^(\S+) online\.$")]
     private static partial Regex DeviceOnline();

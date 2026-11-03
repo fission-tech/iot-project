@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Net;
+using System.Net.Sockets;
 using EdgeGateway.Gateway.Configuration;
 using EdgeGateway.Gateway.Storage;
 using FluentModbus;
@@ -26,7 +27,6 @@ public sealed class ModbusPoller(DeviceDefinition device, DaqSettings settings, 
     private readonly ModbusFrame[] _frames = ModbusFrames.Plan(device.Metrics);
     private int _failures;
     private bool? _online;
-    private List<RawFrame> _raw = [];
     private volatile PollerStatus? _status;
 
     // "connecting" until the first poll, then "polling", "failing" (errors, still counted online), or "offline".
@@ -53,7 +53,7 @@ public sealed class ModbusPoller(DeviceDefinition device, DaqSettings settings, 
             var started = DateTime.UtcNow;
             // The source timestamp is when the device was asked, not when the reply was processed or published.
             var sampledAt = DateTimeOffset.UtcNow;
-            Dictionary<string, MetricValue>? metrics = null;
+            PollResult result;
             try
             {
                 if (!client.IsConnected)
@@ -61,40 +61,45 @@ public sealed class ModbusPoller(DeviceDefinition device, DaqSettings settings, 
                     client.Connect(new IPEndPoint(Resolve(device.Host), device.Port), ModbusEndianness.BigEndian);
                     sampledAt = DateTimeOffset.UtcNow;
                 }
-                metrics = Read(client);
+                result = Read(client);
             }
             catch (Exception error)
             {
                 try { client.Disconnect(); } catch (Exception) { }
                 if (cancellationToken.IsCancellationRequested) break; // stopping mid-poll is not a device failure
-                _failures++;
-                Console.WriteLine($"Poll {device.Id} failed ({error.GetType().Name}: {error.Message}), {_failures} in a row.");
-                // Keep the last good values and raw frames visible; the error says why they are not current.
-                var previous = Status;
-                _status = Snapshot(_online == false ? "offline" : "failing", previous.LastSeq, sampledAt, previous.LastSuccessAt,
-                    $"{error.GetType().Name}: {error.Message}", previous.LastRaw, previous.LastValues);
+                result = new(BadSample(), [], false, $"{error.GetType().Name}: {error.Message}");
             }
+            if (cancellationToken.IsCancellationRequested && !result.TargetResponded) break;
+            // Quality errors in a valid target response do not mean the device is unreachable.
+            _failures = result.TargetResponded ? 0 : _failures + 1;
+            if (result.Error is not null)
+                Console.WriteLine($"Poll {device.Id}: {result.Error}; {_failures} consecutive communication failure(s).");
+            var previous = Status;
+            _status = Snapshot(result.TargetResponded && result.Error is null ? "polling" : _online == false ? "offline" : "failing", previous.LastSeq, sampledAt,
+                previous.LastSuccessAt, result.Error, result.TargetResponded ? result.Raw : previous.LastRaw,
+                result.TargetResponded ? result.Metrics : previous.LastValues);
             // Storage errors must not count as device failures. Finish saving this sample before polling again.
-            if (metrics is not null)
+            if (result.TargetResponded)
             {
-                _failures = 0;
-                var reading = SaveReading(metrics, sampledAt, cancellationToken);
+                var reading = SaveReading(result.Metrics, sampledAt, cancellationToken);
                 if (reading is null) break;
                 if (_online != true) Console.WriteLine($"{device.Id} online.");
                 _online = true;
-                _status = Snapshot("polling", (long)reading.DeviceSeq, sampledAt, sampledAt, null, _raw.ToArray(), metrics);
+                var successAt = result.Raw.Length > 0 ? sampledAt : previous.LastSuccessAt;
+                _status = Snapshot(result.Error is null ? "polling" : "failing", (long)reading.DeviceSeq,
+                    sampledAt, successAt, result.Error, result.Raw, result.Metrics);
             }
             else if (_online == true && _failures < settings.FailedPollsBeforeOffline)
             {
-                if (SaveReading(BadSample(), sampledAt, cancellationToken) is null) break;
+                var reading = SaveReading(result.Metrics, sampledAt, cancellationToken);
+                if (reading is null) break;
+                _status = Status with { LastSeq = (long)reading.DeviceSeq };
             }
             else if (_failures >= settings.FailedPollsBeforeOffline && _online != false)
             {
                 if (!SaveWithRetry(() => outbox.AcceptDeviceOffline(device.Id), "offline event", cancellationToken)) break;
                 _online = false;
-                var previous = Status;
-                _status = Snapshot("offline", previous.LastSeq, sampledAt, previous.LastSuccessAt,
-                    previous.LastError, previous.LastRaw, previous.LastValues);
+                _status = Status with { State = "offline" };
                 Console.WriteLine($"{device.Id} offline after {_failures} failed polls.");
             }
             var wait = interval - (DateTime.UtcNow - started);
@@ -133,41 +138,71 @@ public sealed class ModbusPoller(DeviceDefinition device, DaqSettings settings, 
     }
 
     // One request per frame, then each metric is decoded from its slice of the frame.
-    private Dictionary<string, MetricValue> Read(ModbusTcpClient client)
+    private sealed record PollResult(Dictionary<string, MetricValue> Metrics, RawFrame[] Raw,
+        bool TargetResponded, string? Error);
+
+    private PollResult Read(ModbusTcpClient client)
     {
-        var metrics = new Dictionary<string, MetricValue>(StringComparer.Ordinal);
+        var metrics = BadSample(); // Failed and unattempted frames must not publish stale values as Good.
         var raw = new List<RawFrame>();
-        int unit = device.UnitId;
+        var responded = false;
+        string? error = null;
         foreach (var frame in _frames)
         {
-            if (frame.Register is "coil" or "discrete")
+            try
             {
-                var bits = frame.Register == "coil"
-                    ? client.ReadCoils(unit, frame.Start, frame.Count).ToArray()
-                    : client.ReadDiscreteInputs(unit, frame.Start, frame.Count).ToArray();
-                raw.Add(new(frame.Register, frame.Start,
-                    Enumerable.Range(0, frame.Count).Select(index => (int)ModbusFrames.DecodeBit(bits, index)).ToArray()));
-                foreach (var metric in frame.Metrics)
-                    metrics[metric.Name] = new(Number: ModbusFrames.DecodeBit(bits, metric.Address - frame.Start) * metric.Scale);
-                continue;
+                ReadFrame(client, frame, metrics, raw);
+                responded = true;
             }
-            var words = frame.Register == "holding"
-                ? client.ReadHoldingRegisters<ushort>(unit, frame.Start, frame.Count).ToArray()
-                : client.ReadInputRegisters<ushort>(unit, frame.Start, frame.Count).ToArray();
-            raw.Add(new(frame.Register, frame.Start, words.Select(word => (int)word).ToArray()));
-            foreach (var metric in frame.Metrics)
+            catch (ModbusException failure) when (IsTargetResponse(failure.ExceptionCode))
             {
-                var value = ModbusFrames.Decode(words.AsSpan(metric.Address - frame.Start, metric.Width), metric.Type, metric.Order);
-                // A float register can hold NaN or infinity: report that one value as Bad, keep the rest of the reading.
-                metrics[metric.Name] = double.IsFinite(value)
-                    ? new(Number: Math.Round(value * metric.Scale, 6))
-                    : new(Quality: MetricQuality.Bad);
+                responded = true;
+                error ??= $"{frame.Register} {frame.Start}+{frame.Count}: {failure.ExceptionCode}";
+                // A complete Modbus exception response leaves the next independent request safe to try.
+            }
+            // FluentModbus reports a clean TCP close as InvalidOperationException.
+            catch (Exception failure) when (failure is IOException or SocketException or TimeoutException or ModbusException or InvalidOperationException)
+            {
+                error = $"{frame.Register} {frame.Start}+{frame.Count}: {failure.GetType().Name}: {failure.Message}";
+                try { client.Disconnect(); } catch (Exception) { }
+                break; // Do not issue further requests on a failed/unsynchronised transport.
             }
         }
-        // The GPIO pin is configuration, published with the readings so consumers know which input it is.
-        if (device.GpioPin is { } pin) metrics["GpioPin"] = new(Number: pin);
-        _raw = raw;
-        return metrics;
+        return new(metrics, raw.ToArray(), responded, error);
+    }
+
+    private static bool IsTargetResponse(ModbusExceptionCode code) => code is
+        ModbusExceptionCode.IllegalFunction or ModbusExceptionCode.IllegalDataAddress or
+        ModbusExceptionCode.IllegalDataValue or ModbusExceptionCode.ServerDeviceFailure or
+        ModbusExceptionCode.Acknowledge or ModbusExceptionCode.ServerDeviceBusy or ModbusExceptionCode.MemoryParityError;
+
+    private void ReadFrame(ModbusTcpClient client, ModbusFrame frame,
+        Dictionary<string, MetricValue> metrics, List<RawFrame> raw)
+    {
+        int unit = device.UnitId;
+        if (frame.Register is "coil" or "discrete")
+        {
+            var bits = frame.Register == "coil"
+                ? client.ReadCoils(unit, frame.Start, frame.Count).ToArray()
+                : client.ReadDiscreteInputs(unit, frame.Start, frame.Count).ToArray();
+            raw.Add(new(frame.Register, frame.Start,
+                Enumerable.Range(0, frame.Count).Select(index => (int)ModbusFrames.DecodeBit(bits, index)).ToArray()));
+            foreach (var metric in frame.Metrics)
+                metrics[metric.Name] = new(Number: ModbusFrames.DecodeBit(bits, metric.Address - frame.Start) * metric.Scale);
+            return;
+        }
+        var words = frame.Register == "holding"
+            ? client.ReadHoldingRegisters<ushort>(unit, frame.Start, frame.Count).ToArray()
+            : client.ReadInputRegisters<ushort>(unit, frame.Start, frame.Count).ToArray();
+        raw.Add(new(frame.Register, frame.Start, words.Select(word => (int)word).ToArray()));
+        foreach (var metric in frame.Metrics)
+        {
+            var value = ModbusFrames.Decode(words.AsSpan(metric.Address - frame.Start, metric.Width), metric.Type, metric.Order);
+            // A float register can hold NaN or infinity: report that one value as Bad, keep the rest of the reading.
+            metrics[metric.Name] = double.IsFinite(value)
+                ? new(Number: Math.Round(value * metric.Scale, 6))
+                : new(Quality: MetricQuality.Bad);
+        }
     }
 
     // Same metric list as a good reading (so no rebirth is needed), with no values.

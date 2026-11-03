@@ -5,6 +5,12 @@ internal static class DemoStatusChecks
 {
     public static void Run()
     {
+        var activity = new ActivityLog();
+        activity.FromGateway("Poll meter: holding 200+1: IllegalDataAddress; 0 consecutive communication failure(s).");
+        activity.FromGateway("Poll meter: holding 200+1: IllegalDataAddress; 0 consecutive communication failure(s).");
+        activity.FromGateway("Poll meter: IOException: connection lost; 1 consecutive communication failure(s).");
+        if (activity.Recent().Length != 2 || !activity.Recent().All(entry => entry.Kind == "fail"))
+            throw new Exception("Demo activity lost frame/transport errors or repeated an unchanged error.");
         var directory = Path.Combine(Path.GetTempPath(), "demo-status-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
         var path = Path.Combine(directory, "status.json");
