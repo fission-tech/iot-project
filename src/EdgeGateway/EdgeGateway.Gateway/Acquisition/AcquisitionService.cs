@@ -2,14 +2,16 @@ using EdgeGateway.Gateway.Configuration;
 using EdgeGateway.Gateway.Storage;
 using IoT.Contracts;
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace EdgeGateway.Gateway.Acquisition;
 
 // Runs one poller per configured device. Follows the configuration service: added devices start polling,
 // removed or disabled ones leave with a DDEATH. Keeps the last device list if the service is unreachable.
-public sealed class AcquisitionService(DaqSettings settings, ConfigClient config, Outbox outbox,
-    Connection.BrokerProfiles? brokers = null)
+public sealed class AcquisitionService(DaqSettings settings, ConfigClient config, Outbox outbox, Connection.BrokerProfiles? brokers = null, ILoggerFactory? loggers = null)
 {
+    private readonly ILogger<AcquisitionService> _log = loggers?.CreateLogger<AcquisitionService>() ?? NullLogger<AcquisitionService>.Instance;
     private readonly Dictionary<string, (ModbusPoller Poller, CancellationTokenSource Stop, Task Task)> _pollers = [];
     private readonly object _gate = new();
     private long? _version;
@@ -34,32 +36,24 @@ public sealed class AcquisitionService(DaqSettings settings, ConfigClient config
             while (!cancellationToken.IsCancellationRequested)
             {
                 var fetched = await config.TryFetchAsync(cancellationToken);
-                if (fetched is null && version is null && config.LoadCache() is { } cached)
+                var fetchedFromService = fetched is not null;
+                if (!fetchedFromService && reachable)
+                    _log.LogWarning("Configuration unavailable. Retrying on the next refresh.");
+                else if (fetchedFromService && !reachable)
+                    _log.LogInformation("Configuration service reachable again.");
+                reachable = fetchedFromService;
+                lock (_gate) _configReachable = fetchedFromService;
+                if (fetched is null && version is null) fetched = config.LoadCache();
+                if (fetched is not null)
                 {
-                    Console.WriteLine($"Configuration service unreachable. Using cached configuration v{cached.Version}.");
-                    fetched = cached;
-                }
-                if (fetched is null)
-                {
-                    if (reachable) Console.WriteLine(version is null
-                        ? "Configuration service unreachable and no cached configuration yet. Retrying."
-                        : "Configuration service unreachable. Continuing with the current device list.");
-                    reachable = false;
-                    lock (_gate) _configReachable = false;
-                }
-                else
-                {
-                    if (!reachable) Console.WriteLine("Configuration service reachable again.");
-                    reachable = true;
-                    lock (_gate) _configReachable = true;
                     if (fetched.Version != version)
                     {
-                        // Broker settings do not depend on device storage, so they are handed over first.
+                        // Broker settings remain independent of device storage.
                         brokers?.Offer(fetched.Broker);
                         try
                         {
                             await ApplyAsync(fetched.Devices, cancellationToken);
-                            Console.WriteLine($"Configuration v{fetched.Version}: {fetched.Devices.Length} device(s).");
+                            _log.LogInformation("Configuration v{Version}: {Devices} device(s).", fetched.Version, fetched.Devices.Length);
                             version = fetched.Version;
                             lock (_gate) _version = version;
                         }
@@ -95,18 +89,17 @@ public sealed class AcquisitionService(DaqSettings settings, ConfigClient config
             catch (OperationCanceledException) when (stop.IsCancellationRequested && !cancellationToken.IsCancellationRequested) { }
             stop.Dispose();
             lock (_gate) _pollers.Remove(id);
-            Console.WriteLine($"Stopped polling {id} (configuration changed).");
         }
         // Reconcile persisted intake state too: disabled/deleted devices have no poller after a restart.
         // Keep the published state and queued readings intact; DDEATH follows them in the existing outbox order.
         foreach (var id in outbox.GetIntakeOnlineDeviceIds().Where(id => !wanted.ContainsKey(id)))
         {
-            if (outbox.AcceptDeviceOffline(id)) Console.WriteLine($"{id} offline (not enabled in configuration).");
+            if (outbox.AcceptDeviceOffline(id)) _log.LogInformation("{DeviceId} offline (not enabled in configuration).", id);
         }
         foreach (var device in wanted.Values.Where(device => !_pollers.ContainsKey(device.Id)))
         {
             var stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            var poller = new ModbusPoller(device, settings, outbox);
+            var poller = new ModbusPoller(device, settings, outbox, loggers?.CreateLogger<ModbusPoller>());
             lock (_gate) _pollers[device.Id] = (poller, stop, poller.RunAsync(stop.Token));
         }
     }

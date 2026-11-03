@@ -180,7 +180,7 @@ internal static class BrokerHistoryChecks
         settings.Mqtt.StateDirectory = Path.Combine(directory, "sequence");
         settings.Mqtt.BrokerCertificatePath = cert;
         settings.Mqtt.ConnectTimeoutSeconds = 1;
-        settings.Mqtt.KeepAliveSeconds = 2;
+        settings.Mqtt.KeepAliveSeconds = 5;
         settings.Mqtt.RetryDelaySeconds = settings.Mqtt.MaxRetryDelaySeconds = 1;
         settings.Gateway.DatabasePath = path;
         using var connection = new MqttConnection(settings.Mqtt, settings.Sparkplug);

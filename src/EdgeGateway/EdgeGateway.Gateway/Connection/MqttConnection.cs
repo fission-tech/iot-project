@@ -8,13 +8,16 @@ using MQTTnet;
 using MQTTnet.Formatter;
 using MQTTnet.Exceptions;
 using MQTTnet.Protocol;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace EdgeGateway.Gateway.Connection;
 
 public sealed class MqttConnection : IDisposable
 {
     private readonly IMqttClient _client = new MqttClientFactory().CreateMqttClient();
-    private readonly ConnectionStateMachine _state = new();
+    private readonly ConnectionStateMachine _state;
+    private readonly ILogger<MqttConnection> _log;
     private TaskCompletionSource _disconnected = NewDisconnectSignal();
     private readonly MqttSettings _settings;
     private readonly BirthDeathSequenceStore _sequenceStore;
@@ -31,9 +34,11 @@ public sealed class MqttConnection : IDisposable
     private X509Certificate2? _trustedCertificate;
 
     // Identity (client ID, bdSeq, death topic) is fixed; the broker can change between connections.
-    public MqttConnection(MqttSettings settings, SparkplugSettings sparkplug)
+    public MqttConnection(MqttSettings settings, SparkplugSettings sparkplug, ILogger<MqttConnection>? logger = null)
     {
         _settings = settings;
+        _log = logger ?? NullLogger<MqttConnection>.Instance;
+        _state = new(_log);
         _sequenceStore = new BirthDeathSequenceStore(settings.ClientId, settings.StateDirectory);
         _deathTopic = SparkplugTopics.NodeDeath(sparkplug);
         _client.ConnectedAsync += _ =>
@@ -45,10 +50,10 @@ public sealed class MqttConnection : IDisposable
         {
             if (args.ClientWasConnected && !_intentionalDisconnect)
                 ConnectivityChanged?.Invoke(false, DateTimeOffset.UtcNow);
-            if (_state.TryMoveTo(ConnectionState.Disconnected))
-            {
-                Console.WriteLine("Broker disconnected.");
-            }
+            var changed = _state.TryMoveTo(ConnectionState.Disconnected);
+            if (changed && args.ClientWasConnected && !_intentionalDisconnect)
+                _log.LogWarning("MQTT Connection Lost\nBroker: {Host}:{Port}\nError: {Reason}",
+                    Broker?.Host, Broker?.Port, args.Exception?.GetBaseException().Message ?? args.Reason.ToString());
             _disconnected.TrySetResult();
             return Task.CompletedTask;
         };
@@ -79,7 +84,7 @@ public sealed class MqttConnection : IDisposable
                 ConnectivityChanged?.Invoke(false, DateTimeOffset.UtcNow);
                 throw;
             }
-            Console.WriteLine($"Session bdSeq: {BirthDeathSequence}");
+            _log.LogInformation("Session bdSeq: {BirthDeathSequence}", BirthDeathSequence);
             if (!_state.TryMoveTo(ConnectionState.PublishingBirth))
                 throw new InvalidOperationException("Connection closed before the birth announcement.");
         }
@@ -134,7 +139,7 @@ public sealed class MqttConnection : IDisposable
         catch (Exception error) when (!cancellationToken.IsCancellationRequested)
         {
             // The connection dropped meanwhile; the broker publishes the Will instead.
-            Console.WriteLine($"NDEATH not sent ({error.GetType().Name}).");
+            _log.LogWarning("NDEATH not sent ({ErrorType}): {Reason}", error.GetType().Name, error.GetBaseException().Message);
         }
         _state.TryMoveTo(ConnectionState.Disconnected);
         if (!_state.TryMoveTo(ConnectionState.RetryWaiting))
@@ -168,13 +173,13 @@ public sealed class MqttConnection : IDisposable
         _intentionalDisconnect = true;
         await PublishAsync(_deathTopic, SparkplugPayloads.NodeDeath(BirthDeathSequence).ToByteArray(),
             cancellationToken, MqttQualityOfServiceLevel.AtLeastOnce);
-        Console.WriteLine($"Published NDEATH: {_deathTopic} (bdSeq {BirthDeathSequence})");
+        _log.LogInformation("Published NDEATH: {Topic} (bdSeq {BirthDeathSequence})", _deathTopic, BirthDeathSequence);
         var handled = _disconnected.Task;
         await _client.DisconnectAsync(new MqttClientDisconnectOptionsBuilder().Build(), cancellationToken);
         // The client reports the disconnect asynchronously. Wait for that handler, so it cannot run during the next
         // connection (an immediate reconnect to switched broker settings) and abort it.
         try { await handled.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken); }
-        catch (TimeoutException) { Console.WriteLine("Disconnect was not confirmed within 5s."); }
+        catch (TimeoutException) { _log.LogWarning("Disconnect was not confirmed within 5s."); }
     }
 
     public async Task DisconnectAsync(CancellationToken cancellationToken)
@@ -188,11 +193,11 @@ public sealed class MqttConnection : IDisposable
         catch (Exception error) when (error is MqttCommunicationException or IOException)
         {
             // A lost transport cannot send NDEATH; disposal closes it and the broker handles the Will.
-            Console.WriteLine("Connection closed during shutdown.");
+            _log.LogInformation("Connection closed during shutdown.");
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            Console.WriteLine("Disconnect timed out.");
+            _log.LogWarning("Disconnect timed out.");
         }
         finally
         {

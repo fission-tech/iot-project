@@ -46,7 +46,8 @@ public sealed record DeviceDefinition(
 
 // Where a value lives on the device and how to turn the raw register(s) into an engineering value:
 // value = decoded(DataType, WordOrder) × Scale. 32-bit types span two consecutive registers.
-public sealed record MetricDefinition(string Name, string Register, ushort Address, double Scale, string Unit,
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record MetricDefinition(string Name, string Register, [property: JsonRequired] ushort Address, double Scale, string Unit,
     string? DataType = null, string? WordOrder = null)
 {
     public static readonly string[] Registers = ["holding", "input", "coil", "discrete"];

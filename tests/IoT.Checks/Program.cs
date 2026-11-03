@@ -6,6 +6,43 @@ using Org.Eclipse.Tahu.Protobuf;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 
+if (args is ["--log-format-only"])
+{
+    ErrorReportingChecks.FormatAndActivity();
+    Console.WriteLine("PASS: Log levels, no category/event ID/timezone, single-line messages, exceptions and Demo parsing.");
+    return;
+}
+
+if (args is ["--configuration-reporting-only"])
+{
+    await ErrorReportingChecks.RunConfigurationAsync();
+    return;
+}
+
+if (args is ["--error-reporting-only"])
+{
+    await ErrorReportingChecks.RunAsync();
+    return;
+}
+
+if (args is ["--metric-address-only"])
+{
+    MetricAddressChecks.Run();
+    return;
+}
+
+if (args is ["--numeric-decoding-only"])
+{
+    await NumericDecodingChecks.RunAsync();
+    return;
+}
+
+if (args is ["--frame-isolation-only"])
+{
+    await FrameIsolationChecks.RunAsync();
+    return;
+}
+
 if (args is ["--configuration-migrations-only"])
 {
     ConfigurationMigrationChecks.Run();
@@ -20,7 +57,8 @@ if (args is ["--broker-profile-only"])
 
 if (args is ["--broker-history-only"])
 {
-    BrokerHistoryChecks.Run();
+    await ErrorReportingChecks.RunAsync();
+BrokerHistoryChecks.Run();
     return;
 }
 
@@ -370,6 +408,10 @@ finally
 await ModbusChecks.RunAsync();
 BrokerProfileChecks.Run();
 await GatewayBrokerChecks.RunAsync();
+await FrameIsolationChecks.RunAsync();
+MetricAddressChecks.Run();
+await NumericDecodingChecks.RunAsync();
+await ErrorReportingChecks.RunAsync();
 BrokerHistoryChecks.Run();
 DemoStatusChecks.Run();
 ConfigurationMigrationChecks.Run();

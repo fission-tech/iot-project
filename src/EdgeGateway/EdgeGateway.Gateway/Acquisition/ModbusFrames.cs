@@ -45,9 +45,10 @@ public static class ModbusFrames
         var raw = (uint)high << 16 | low;
         return dataType switch
         {
-            "uint32" => raw,
-            "int32" => (int)raw,
-            "float32" => BitConverter.Int32BitsToSingle((int)raw),
+            // Keep a common double result: a float result would round large integer branches first.
+            "uint32" => (double)raw,
+            "int32" => (double)(int)raw,
+            "float32" => (double)BitConverter.Int32BitsToSingle((int)raw),
             _ => throw new ArgumentException($"Unsupported data type {dataType}.")
         };
     }
