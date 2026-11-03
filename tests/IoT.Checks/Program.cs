@@ -6,6 +6,18 @@ using Org.Eclipse.Tahu.Protobuf;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 
+if (args is ["--metric-address-only"])
+{
+    MetricAddressChecks.Run();
+    return;
+}
+
+if (args is ["--numeric-decoding-only"])
+{
+    await NumericDecodingChecks.RunAsync();
+    return;
+}
+
 if (args is ["--frame-isolation-only"])
 {
     await FrameIsolationChecks.RunAsync();
@@ -377,6 +389,8 @@ await ModbusChecks.RunAsync();
 BrokerProfileChecks.Run();
 await GatewayBrokerChecks.RunAsync();
 await FrameIsolationChecks.RunAsync();
+MetricAddressChecks.Run();
+await NumericDecodingChecks.RunAsync();
 BrokerHistoryChecks.Run();
 DemoStatusChecks.Run();
 ConfigurationMigrationChecks.Run();

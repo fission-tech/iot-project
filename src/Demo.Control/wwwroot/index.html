@@ -809,8 +809,10 @@ function readDeviceForm() {
     metrics: [...form.querySelectorAll(".mrow")].map(row => {
       const get = key => row.querySelector(`[data-m="${key}"]`);
       const dataType = get("dataType").value;
+      const address = get("address").value.trim();
+      if (address === "") throw new Error(`${get("name").value.trim() || "Metric"}: address is required.`);
       return {
-        name: get("name").value.trim(), register: get("register").value, address: Number(get("address").value),
+        name: get("name").value.trim(), register: get("register").value, address: Number(address),
         scale: Number(get("scale").value), unit: get("unit").value.trim(), dataType,
         wordOrder: ["int32", "uint32", "float32"].includes(dataType) ? get("wordOrder").value : null
       };
@@ -819,7 +821,9 @@ function readDeviceForm() {
 }
 
 async function saveDeviceForm() {
-  const device = readDeviceForm();
+  let device;
+  try { device = readDeviceForm(); }
+  catch (error) { $("form-error").textContent = error.message; return; }
   const editing = formEditing;
   const form = $("device-form");
   const newInterface = !editing && form.elements.interfaceId.value === ""
