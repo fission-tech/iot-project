@@ -1,4 +1,4 @@
-﻿// Edge gateway: polls the Modbus devices listed by the configuration service, buffers every reading in
+// Edge gateway: polls the Modbus devices listed by the configuration service, buffers every reading in
 // a SQLite outbox and publishes it to Mosquitto as Sparkplug B.
 using EdgeGateway.Gateway.Configuration;
 using EdgeGateway.Gateway.Connection;
@@ -7,8 +7,14 @@ using EdgeGateway.Gateway.Storage;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Logging.Console;
+using EdgeGateway.Gateway.Diagnostics;
 
 using var stop = new CancellationTokenSource();
+ILoggerFactory? loggers = null;
+ILogger log = NullLogger.Instance;
 // Ctrl+C (SIGINT) and SIGTERM (docker stop, Kubernetes, systemd) both shut down cleanly: stop polling,
 // let the current publish finish, send NDEATH and disconnect. If that hangs, exit after 15 seconds anyway;
 // nothing is lost because the outbox is on disk and the broker publishes the NDEATH Will.
@@ -16,7 +22,7 @@ void RequestShutdown(PosixSignalContext context)
 {
     context.Cancel = true;
     if (stop.IsCancellationRequested) return;
-    Console.WriteLine($"{context.Signal} received. Shutting down.");
+    log.LogInformation("{Signal} received. Shutting down.", context.Signal);
     stop.Cancel();
     _ = Task.Delay(TimeSpan.FromSeconds(15)).ContinueWith(_ => Environment.Exit(1), TaskScheduler.Default);
 }
@@ -26,16 +32,21 @@ try
 {
     var configuration = new ConfigurationBuilder().SetBasePath(AppContext.BaseDirectory)
         .AddJsonFile("appsettings.json").AddCommandLine(args).Build();
+    loggers = LoggerFactory.Create(builder => builder
+        .AddConfiguration(configuration.GetSection("Logging"))
+        .AddConsole(options => options.FormatterName = "gateway")
+        .AddConsoleFormatter<GatewayConsoleFormatter, ConsoleFormatterOptions>());
+    log = loggers.CreateLogger("Gateway");
     var settings = configuration.Get<GatewaySettings>()
         ?? throw new InvalidOperationException("Could not read appsettings.json.");
     using var outbox = new Outbox(settings.Gateway.DatabasePath);
-    using var connection = new MqttConnection(settings.Mqtt, settings.Sparkplug);
-    // Broker settings come from the registry row named by Mqtt:BrokerId; appsettings is the first-boot seed.
+    using var connection = new MqttConnection(settings.Mqtt, settings.Sparkplug, loggers.CreateLogger<MqttConnection>());
+    // Broker settings come from the registry; appsettings remains the first-boot seed.
     var brokers = new BrokerProfiles(settings.Mqtt);
     using var config = new ConfigClient(settings.Daq, settings.Mqtt.BrokerId);
-    var acquisition = new AcquisitionService(settings.Daq, config, outbox, brokers);
-    var runner = new GatewayRunner(connection, outbox, settings, brokers);
-    Console.WriteLine($"Outbox: {settings.Gateway.DatabasePath} ({outbox.CountUnsent()} unsent). Type stop to exit.");
+    var acquisition = new AcquisitionService(settings.Daq, config, outbox, brokers, loggers);
+    var runner = new GatewayRunner(connection, outbox, settings, brokers, loggers.CreateLogger<GatewayRunner>());
+    log.LogInformation("Outbox: {DatabasePath} ({Unsent} unsent). Type stop to exit.", settings.Gateway.DatabasePath, outbox.CountUnsent());
     var input = Task.Run(() =>
     {
         while (!stop.IsCancellationRequested)
@@ -44,7 +55,7 @@ try
             // Without console input (for example under the launcher) run until stopped.
             if (command is null) stop.Token.WaitHandle.WaitOne();
             if (command is null or "stop") break;
-            if (command != "") Console.WriteLine("Commands: stop.");
+            if (command != "") log.LogInformation("Commands: stop.");
         }
     });
     // Polling commits to the outbox and keeps going while the broker is down; publishing drains it.
@@ -60,7 +71,7 @@ try
     }
     catch (OperationCanceledException) when (stop.IsCancellationRequested)
     {
-        Console.WriteLine("Stopping...");
+        log.LogInformation("Stopping...");
     }
     finally
     {
@@ -76,7 +87,7 @@ try
             await connection.DisconnectAsync(disconnectTimeout.Token);
         }
     }
-    Console.WriteLine("Disconnected.");
+    log.LogInformation("Disconnected.");
 
     // A status snapshot for local tools such as the demo console; not part of the data path.
     async Task WriteStatusAsync(string path, CancellationToken cancellationToken)
@@ -106,6 +117,8 @@ try
 }
 catch (Exception error)
 {
-    Console.Error.WriteLine($"Gateway error: {error.Message}");
+    if (loggers is null) Console.Error.WriteLine($"[ERROR] Gateway startup failed: {error.Message}");
+    else log.LogError(error, "Gateway stopped unexpectedly.");
     Environment.ExitCode = 1;
 }
+finally { loggers?.Dispose(); }

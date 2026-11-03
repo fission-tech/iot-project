@@ -32,6 +32,8 @@ Each metric in the registry says where its value lives and how to decode it:
 | `wordOrder` | 32-bit types span two registers: `big` (default, high word first) or `little` (word-swapped devices) |
 | `scale`, `unit` | value = decoded × scale, e.g. `0.1` for a register holding tenths |
 
+Gateway logs use .NET `ILogger` with a concise `[INFO]`/`[WARN]` console format, date/time without a timezone offset, and concise frame/metric errors and recovery messages. Routine readings and publishes are DEBUG; use `--Logging:LogLevel:Default=Debug` for details. See [Gateway error reporting](docs/gateway-error-reporting.md) for examples, a before/after summary and checks.
+
 The gateway groups each device's metrics into **frames**: one read request per run of nearby registers of the same type (up to 125 registers or 2000 bits; gaps of up to 8 registers are read through), then decodes each metric from its slice.
 
 Addresses are 0-based. Tools such as ModSim number holding registers from 40001, so register 40001 is address 0 and 40100 is address 99.

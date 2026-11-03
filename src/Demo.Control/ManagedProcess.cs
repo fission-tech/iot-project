@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 
 namespace Demo.Control;
 
@@ -95,7 +96,9 @@ public sealed class ManagedProcess(string name, string workspace, string logDire
 
     private void Append(string line)
     {
-        var stamped = $"{DateTime.Now:HH:mm:ss} {line}";
+        var alreadyDated = line.Length >= 19 && DateTime.TryParseExact(line.AsSpan(0, 19),
+            "yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture, DateTimeStyles.None, out _);
+        var stamped = alreadyDated ? line : $"{DateTime.Now:HH:mm:ss} {line}";
         lock (_lines)
         {
             _lines.AddLast(stamped);

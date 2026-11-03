@@ -4,11 +4,15 @@ using EdgeGateway.Gateway.Sparkplug;
 using EdgeGateway.Gateway.Storage;
 using Google.Protobuf;
 using MQTTnet.Protocol;
+using MQTTnet.Exceptions;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace EdgeGateway.Gateway.Connection;
 
-public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, GatewaySettings settings, BrokerProfiles? brokers = null)
+public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, GatewaySettings settings, BrokerProfiles? brokers = null, ILogger<GatewayRunner>? logger = null)
 {
+    private readonly ILogger<GatewayRunner> _log = logger ?? NullLogger<GatewayRunner>.Instance;
     // Initializers run in order: the first one settles the shared instance the selector then uses.
     private readonly BrokerProfiles _brokers = brokers ??= new BrokerProfiles(settings.Mqtt);
     private readonly BrokerSelector _selector = new(brokers, TimeSpan.FromSeconds(settings.Mqtt.BrokerTrialSeconds));
@@ -41,7 +45,7 @@ public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, Gate
             catch (Microsoft.Data.Sqlite.SqliteException error)
             {
                 // A diagnostics write must not turn a successful MQTT connection into a failed one.
-                Console.Error.WriteLine($"Broker history could not be recorded: {error.Message}");
+                _log.LogWarning("Broker history could not be recorded: {Reason}", error.Message);
             }
         }
         connection.ConnectivityChanged += RecordConnectivity;
@@ -73,27 +77,32 @@ public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, Gate
         var broker = _selector.Next(DateTimeOffset.UtcNow);
         var delaySeconds = broker.RetryDelaySeconds;
         var attempt = 0;
+        string? lastFailure = null;
+        var reportedAt = DateTimeOffset.MinValue;
         while (!cancellationToken.IsCancellationRequested)
         {
             broker = _selector.Next(DateTimeOffset.UtcNow);
             var switching = false;
+            var operation = "connect";
             try
             {
-                Console.WriteLine($"Connecting {mqtt.ClientId} to broker {BrokerProfiles.Describe(broker)}...");
+                _log.LogDebug("Connecting {ClientId} to broker {Broker}...", mqtt.ClientId, BrokerProfiles.Describe(broker));
                 await connection.ConnectAsync(broker, cancellationToken);
-                Console.WriteLine("Connected.");
+                _log.LogInformation("MQTT {Connection}. Broker: {Host}:{Port}", attempt == 0 ? "connected" : "connection restored", broker.Host, broker.Port);
                 _host.Reset();
                 // Subscribe before the birth so the host's STATE and rebirth commands are not missed.
+                operation = "subscribe";
                 await connection.SubscribeAsync(stateTopic is null ? [commandTopic] : [commandTopic, stateTopic],
                     cancellationToken);
                 if (HostRequired && !_host.CameOnline.IsCompleted)
                 {
-                    Console.WriteLine($"Waiting for primary host {settings.Sparkplug.HostId}. Buffering readings meanwhile.");
+                    _log.LogInformation("Waiting for primary host {HostId}. Buffering readings meanwhile.", settings.Sparkplug.HostId);
                     var disconnected = connection.WaitForDisconnectAsync(cancellationToken);
                     if (await Task.WhenAny(_host.CameOnline, disconnected) != _host.CameOnline)
                         throw new InvalidOperationException("Disconnected while waiting for the primary host.");
                 }
                 Interlocked.Exchange(ref _rebirthRequested, 0);
+                operation = "publish NBIRTH";
                 await PublishNodeBirthAsync(cancellationToken);
                 if (!connection.MarkOnline())
                     throw new InvalidOperationException("Connection closed during the birth announcement.");
@@ -102,6 +111,8 @@ public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, Gate
                 _connected = new(broker, connection.CertificateExpires);
                 attempt = 0;
                 delaySeconds = broker.RetryDelaySeconds;
+                lastFailure = null;
+                operation = "publish/replay";
                 switching = await RunSessionAsync(cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -110,7 +121,19 @@ public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, Gate
             }
             catch (Exception error)
             {
-                Console.WriteLine($"Connection failed: {error.Message}");
+                var reason = $"{BrokerProfiles.Describe(broker)} {operation}: {error.GetType().Name}: {error.GetBaseException().Message}";
+                if (reason != lastFailure || DateTimeOffset.UtcNow - reportedAt >= TimeSpan.FromSeconds(30))
+                {
+                    if (error is Microsoft.Data.Sqlite.SqliteException)
+                        _log.LogError("Gateway state operation failed ({Operation}): {Reason}", operation, error.Message);
+                    else if (error is MqttCommunicationException or IOException or InvalidOperationException or TimeoutException)
+                        _log.LogWarning("Connection failed ({ErrorType}): {Reason} Retrying in {Delay}s.",
+                            error.GetType().Name, error.GetBaseException().Message, delaySeconds);
+                    else
+                        _log.LogError(error, "Gateway operation failed unexpectedly ({Operation}).", operation);
+                    lastFailure = reason;
+                    reportedAt = DateTimeOffset.UtcNow;
+                }
                 _selector.Failed(broker, error.Message);
             }
             cancellationToken.ThrowIfCancellationRequested();
@@ -118,7 +141,7 @@ public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, Gate
             await connection.PrepareRetryAsync(cancellationToken);
             if (switching) continue; // New settings are tried at once; readings wait in the outbox meanwhile.
             attempt++;
-            Console.WriteLine($"Retry {attempt} in {delaySeconds}s. {outbox.CountUnsent()} message(s) buffered.");
+            _log.LogDebug("Retry {Attempt} in {Delay}s. {Buffered} message(s) buffered.", attempt, delaySeconds, outbox.CountUnsent());
             await Task.Delay(TimeSpan.FromSeconds(delaySeconds), cancellationToken);
             delaySeconds = (int)Math.Min((long)delaySeconds * 2, broker.MaxRetryDelaySeconds);
         }
@@ -130,11 +153,11 @@ public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, Gate
         {
             if (!SparkplugPayloads.IsRebirthCommand(payload)) return;
             Interlocked.Exchange(ref _rebirthRequested, 1);
-            Console.WriteLine("Rebirth requested by host.");
+            _log.LogInformation("Rebirth requested by host.");
         }
         catch (InvalidProtocolBufferException)
         {
-            Console.WriteLine("Ignored invalid NCMD.");
+            _log.LogWarning("Ignored invalid NCMD. Payload is not valid Sparkplug Protobuf.");
         }
     }
 
@@ -163,10 +186,10 @@ public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, Gate
             var finished = await Task.WhenAny(disconnected, publishing, hostOffline, switching);
             if (finished == publishing) await publishing;
             else if (finished == hostOffline)
-                Console.WriteLine("Primary host went offline. Ending session and buffering until it returns.");
+                _log.LogInformation("Primary host went offline. Ending session and buffering until it returns.");
             else if (finished == switching)
             {
-                Console.WriteLine("Broker settings changed in the registry. Ending this session to switch.");
+                _log.LogInformation("Broker settings changed in the registry. Ending this session to switch.");
                 return true;
             }
             else await disconnected;
@@ -219,7 +242,7 @@ public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, Gate
             }
             if (!announcedBacklog && rows[0].CreatedAt < sessionStart)
             {
-                Console.WriteLine($"Replaying {outbox.CountUnsent()} buffered message(s).");
+                _log.LogInformation("Replaying {Buffered} buffered message(s).", outbox.CountUnsent());
                 announcedBacklog = true;
             }
             foreach (var row in rows)
@@ -249,7 +272,11 @@ public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, Gate
                 $"{metric.Key}={metric.Value.Number?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? metric.Value.Boolean?.ToString() ?? metric.Value.Quality}"))
             : "";
         LastPublished = $"{row.Kind} {row.DeviceId}{(row.Reading is { } sent ? $" #{sent.DeviceSeq}" : "")}";
-        Console.WriteLine($"{row.Kind} {row.DeviceId}{detail} (seq {sequence}{(historical ? ", historical" : "")})");
+        if (row.Kind == "DDATA")
+            _log.LogDebug("{Kind} {DeviceId}{Detail} (seq {Sequence}{Historical})", row.Kind, row.DeviceId, detail,
+                sequence, historical ? ", historical" : "");
+        else
+            _log.LogInformation("{Kind} {DeviceId} (seq {Sequence})", row.Kind, row.DeviceId, sequence);
     }
 
     private async Task PublishNodeBirthAsync(CancellationToken cancellationToken)
@@ -258,7 +285,7 @@ public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, Gate
         await connection.PublishAsync(topic,
             SparkplugPayloads.NodeBirth(connection.BirthDeathSequence, UptimeSeconds).ToByteArray(),
             cancellationToken, MqttQualityOfServiceLevel.AtLeastOnce);
-        Console.WriteLine($"Published NBIRTH: {topic} (bdSeq {connection.BirthDeathSequence})");
+        _log.LogInformation("Published NBIRTH: {Topic} (bdSeq {BirthDeathSequence})", topic, connection.BirthDeathSequence);
     }
 
     // Births describe the last broker-acknowledged state, before replaying the remaining backlog.
@@ -270,7 +297,7 @@ public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, Gate
             var topic = SparkplugTopics.DeviceBirth(settings.Sparkplug, reading.DeviceId);
             await connection.PublishAsync(topic, SparkplugPayloads.DeviceReading(current, reading).ToByteArray(),
                 cancellationToken, MqttQualityOfServiceLevel.AtLeastOnce);
-            Console.WriteLine($"Published DBIRTH: {topic} (seq {current})");
+            _log.LogInformation("Published DBIRTH: {Topic} (seq {Sequence})", topic, current);
         }
     }
 }

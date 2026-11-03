@@ -5,12 +5,25 @@ internal static class DemoStatusChecks
 {
     public static void Run()
     {
+        var process = new ManagedProcess("unused", ".", ".");
+        var append = typeof(ManagedProcess).GetMethod("Append", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        const string dated = "2026-11-02 15:30:00 [INFO] device-01: Pressure reading recovered. Quality = good.";
+        append.Invoke(process, [dated]);
+        append.Invoke(process, ["Undated message"]);
+        if (process.Tail(2)[0] != dated || !process.Tail(2)[1].EndsWith(" Undated message", StringComparison.Ordinal))
+            throw new Exception("Demo duplicated Gateway timestamps or stopped stamping undated output.");
         var activity = new ActivityLog();
-        activity.FromGateway("Poll meter: holding 200+1: IllegalDataAddress; 0 consecutive communication failure(s).");
-        activity.FromGateway("Poll meter: holding 200+1: IllegalDataAddress; 0 consecutive communication failure(s).");
-        activity.FromGateway("Poll meter: IOException: connection lost; 1 consecutive communication failure(s).");
-        if (activity.Recent().Length != 2 || !activity.Recent().All(entry => entry.Kind == "fail"))
-            throw new Exception("Demo activity lost frame/transport errors or repeated an unchanged error.");
+        activity.FromGateway("2026-11-03 14:00:00 [WARN] Device meter: holding 200+1 [Pressure]: IllegalDataAddress (0x02).");
+        activity.FromGateway("2026-11-03 14:00:01 [INFO] meter: Pressure reading recovered. Quality = good.");
+        activity.FromGateway("2026-11-03 14:00:02 [WARN] Device meter: holding 200+1 [Pressure]: IllegalDataAddress (0x02).");
+        if (activity.Recent().Length != 3 || activity.Recent().Count(entry => entry.Kind == "fail") != 2
+            || activity.Recent().Count(entry => entry.Kind == "online") != 1)
+            throw new Exception("Demo activity lost current error/recovery messages or suppressed a recurring error.");
+        activity.FromGateway("2026-11-03 14:00:03 [INFO] meter offline (not enabled in configuration).");
+        activity.FromGateway("2026-11-03 14:00:04 [ERROR] Gateway stopped unexpectedly.");
+        if (activity.Recent().Count(entry => entry.Kind == "offline") != 1
+            || activity.Recent().Count(entry => entry.Kind == "fail") != 3)
+            throw new Exception("Demo activity lost disabled-device or fatal Gateway messages.");
         var directory = Path.Combine(Path.GetTempPath(), "demo-status-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
         var path = Path.Combine(directory, "status.json");

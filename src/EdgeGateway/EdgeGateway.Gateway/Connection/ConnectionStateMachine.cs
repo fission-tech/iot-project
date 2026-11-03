@@ -1,3 +1,6 @@
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+
 namespace EdgeGateway.Gateway.Connection;
 
 public enum ConnectionState
@@ -11,8 +14,9 @@ public enum ConnectionState
     Stopped
 }
 
-public sealed class ConnectionStateMachine
+public sealed class ConnectionStateMachine(ILogger? logger = null)
 {
+    private readonly ILogger _log = logger ?? NullLogger.Instance;
     private readonly object _sync = new();
     private ConnectionState _current = ConnectionState.Disconnected;
 
@@ -44,7 +48,7 @@ public sealed class ConnectionStateMachine
 
             if (!allowed) return false;
 
-            Console.WriteLine($"State: {_current} -> {next}");
+            _log.LogDebug("State: {Previous} -> {Next}", _current, next);
             _current = next;
             return true;
         }
