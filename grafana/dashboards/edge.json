@@ -73,6 +73,13 @@
       "id": 2,
       "type": "stat",
       "title": "Latest value",
+      "fieldConfig": {
+        "defaults": { "noValue": "No value" },
+        "overrides": [
+          { "matcher": { "id": "byRegexp", "options": ".*\\[Bad\\]$" }, "properties": [ { "id": "noValue", "value": "Bad value" } ] },
+          { "matcher": { "id": "byRegexp", "options": ".*\\[Stale\\]$" }, "properties": [ { "id": "noValue", "value": "Stale value" } ] }
+        ]
+      },
       "gridPos": { "x": 0, "y": 10, "w": 12, "h": 5 },
       "datasource": { "type": "grafana-postgresql-datasource", "uid": "history" },
       "options": {
@@ -88,7 +95,7 @@
           "format": "time_series",
           "rawQuery": true,
           "editorMode": "code",
-          "rawSql": "SELECT time, metric, value\nFROM (\n  SELECT DISTINCT ON (device, metric) time, device || ' · ' || metric AS metric, value\n  FROM readings\n  WHERE time > now() - INTERVAL '1 day' AND value IS NOT NULL\n    AND node IN ($node) AND device IN ($device) AND metric IN ($metric)\n  ORDER BY device, metric, time DESC\n) latest\nORDER BY time ASC, metric"
+          "rawSql": "WITH latest_sample AS (\n  SELECT node, device, MAX(time) AS time\n  FROM readings\n  WHERE time > now() - INTERVAL '1 day'\n    AND node IN ($node)\n    AND device IN ($device)\n  GROUP BY node, device\n)\nSELECT r.time, r.device || ' · ' || r.metric || CASE r.quality WHEN 'bad' THEN ' [Bad]' WHEN 'stale' THEN ' [Stale]' ELSE '' END AS metric, r.value\nFROM readings r\nJOIN latest_sample s USING (node, device, time)\nWHERE r.metric IN ($metric)\nORDER BY r.time ASC, metric"
         }
       ]
     },
@@ -119,8 +126,8 @@
     {
       "id": 4,
       "type": "stat",
-      "title": "Replayed from outbox",
-      "description": "Readings the gateway buffered during a broker outage and sent afterwards (Sparkplug is_historical).",
+      "title": "Replayed device samples",
+      "description": "Unique device samples received as historical, counted once across metrics and retries. Filtered by original measurement time and selected devices/metrics.",
       "gridPos": { "x": 16, "y": 10, "w": 4, "h": 5 },
       "datasource": { "type": "grafana-postgresql-datasource", "uid": "history" },
       "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "none", "graphMode": "none" },
@@ -130,7 +137,7 @@
           "format": "table",
           "rawQuery": true,
           "editorMode": "code",
-          "rawSql": "SELECT count(*) AS replayed\nFROM readings\nWHERE $__timeFilter(time) AND historical\n  AND node IN ($node) AND device IN ($device) AND metric IN ($metric)"
+          "rawSql": "SELECT count(DISTINCT (node, device, device_seq, time)) AS replayed\nFROM readings\nWHERE $__timeFilter(time) AND historical\n  AND node IN ($node) AND device IN ($device) AND metric IN ($metric)"
         }
       ]
     },

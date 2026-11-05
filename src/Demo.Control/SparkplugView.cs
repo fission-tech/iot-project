@@ -54,10 +54,10 @@ public sealed class SparkplugView
             if (metrics.GetValueOrDefault("DeviceSeq") is { } number)
             {
                 var seq = (long)number;
+                if (type == "DDATA" && historical) state.HistoricalSeqs.Add(seq);
                 // A rebirth re-sends the last reading in its DBIRTH; only a repeated DDATA is a duplicate.
                 if (type == "DDATA" && !state.DataSeqs.Add(seq)) { state.Duplicates++; return; }
                 state.Seqs.Add(seq);
-                if (type == "DDATA" && historical) state.Historical++;
             }
             if (state.RecordedAt is null || recordedAt >= state.RecordedAt)
             {
@@ -103,7 +103,7 @@ public sealed class SparkplugView
                 var seqs = item.Value.Seqs;
                 var (first, last) = (seqs.Min(), seqs.Max());
                 return new DeviceSummaryView(item.Key, seqs.Count, first, last, last - first + 1 - seqs.Count,
-                    item.Value.Duplicates, item.Value.Historical);
+                    item.Value.Duplicates, item.Value.HistoricalSeqs.Count);
             }).ToArray();
     }
 
@@ -127,7 +127,7 @@ public sealed class SparkplugView
         public HashSet<long> Seqs { get; } = [];
         public HashSet<long> DataSeqs { get; } = [];
         public long Duplicates { get; set; }
-        public long Historical { get; set; }
+        public HashSet<long> HistoricalSeqs { get; } = [];
         public bool Online { get; set; }
         public DateTimeOffset? RecordedAt { get; set; }
         public Dictionary<string, double?> Metrics { get; set; } = [];

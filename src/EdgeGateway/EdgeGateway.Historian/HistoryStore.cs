@@ -4,8 +4,7 @@ using NpgsqlTypes;
 
 namespace EdgeGateway.Historian;
 
-// Writes Sparkplug rows to TimescaleDB. Reading inserts skip rows that already exist,
-// so QoS 1 redelivery, outbox replay and the last reading repeated in a DBIRTH never duplicate data.
+// Stores each metric sample once. A replay can mark it historical without replacing its original measurement.
 public sealed class HistoryStore(string connectionString) : IAsyncDisposable
 {
     private readonly NpgsqlDataSource _source = NpgsqlDataSource.Create(connectionString);
@@ -66,7 +65,9 @@ public sealed class HistoryStore(string connectionString) : IAsyncDisposable
                 INSERT INTO readings (time, node, device, metric, value, quality, historical, device_seq)
                 SELECT * FROM unnest($1::timestamptz[], $2::text[], $3::text[], $4::text[], $5::float8[],
                                      $6::text[], $7::boolean[], $8::bigint[])
-                ON CONFLICT DO NOTHING
+                ON CONFLICT (node, device, metric, time) DO UPDATE
+                SET historical = true
+                WHERE EXCLUDED.historical AND NOT readings.historical
                 """, connection, transaction)
             {
                 Parameters =

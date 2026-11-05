@@ -142,6 +142,120 @@ internal static class HistorianChecks
         Check(await Count("SELECT count(*) FROM timescaledb_information.jobs WHERE hypertable_name IN ('readings') OR proc_name = 'policy_refresh_continuous_aggregate'") >= 3,
             "Compression, retention and rollup policies are missing.");
         await CheckLifecycleAsync(store, source, connectionString);
+        await CheckReplayCountsAsync(store, source);
+        await CheckLatestValuesAsync(store, source);
+    }
+
+    private static async Task CheckLatestValuesAsync(HistoryStore store, NpgsqlDataSource source)
+    {
+        const string node = "latest-check/gateway";
+        var now = DateTimeOffset.UtcNow;
+        using var dashboard = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(FindRoot(), "grafana", "dashboards", "edge.json")));
+        var panel = dashboard.RootElement.GetProperty("panels").EnumerateArray().Single(panel => panel.GetProperty("id").GetInt32() == 2);
+        var panelSql = panel.GetProperty("targets")[0].GetProperty("rawSql").GetString()!;
+        async Task Send(string gateway, string device, int secondsAgo, Dictionary<string, MetricValue> metrics, bool historical = false)
+        {
+            var reading = new DeviceReading(device, (ulong)secondsAgo, now.AddSeconds(-secondsAgo), metrics);
+            await store.WriteAsync(SparkplugRows.From($"spBv1.0/latest-check/DDATA/{gateway}/{device}",
+                SparkplugPayloads.DeviceReading(1, reading, historical).ToByteArray(), now), CancellationToken.None);
+        }
+        async Task<List<(DateTime Time, string Metric, double? Value)>> Latest(string metrics = "'Temperature','Humidity','Pressure'", string devices = "'first'", string nodes = "'latest-check/gateway'")
+        {
+            await using var command = source.CreateCommand(panelSql.Replace("$node", nodes).Replace("$device", devices).Replace("$metric", metrics));
+            await using var reader = await command.ExecuteReaderAsync();
+            var result = new List<(DateTime, string, double?)>();
+            while (await reader.ReadAsync()) result.Add((reader.GetDateTime(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetDouble(2)));
+            return result;
+        }
+        await Send("gateway", "first", 120, new() { ["Temperature"] = new(Number: 4.5), ["Humidity"] = new(Number: 65) });
+        await Send("gateway", "first", 60, new() { ["Temperature"] = new(Number: 5) });
+        var latest = await Latest();
+        Check(latest.Count == 1 && latest[0].Value == 5, "Removed Humidity must not survive in Latest value.");
+        Check((await Latest("'Humidity'")).Count == 0, "Selecting a removed metric must not resurrect old values.");
+        await Send("gateway", "first", 30, new() { ["Temperature"] = new(Number: 6), ["Pressure"] = new(Number: 120) });
+        Check((await Latest()).Count == 2, "A newly added metric must appear in the latest full sample.");
+        await Send("gateway", "first", 15, new() { ["Temperature"] = new(Quality: MetricQuality.Bad), ["Pressure"] = new(Number: 121) });
+        latest = await Latest();
+        Check(latest.Count == 2 && latest.Single(row => row.Metric.EndsWith("Temperature [Bad]")).Value is null,
+            "Latest Bad/null must not fall back to an older Good temperature.");
+        await Send("gateway", "first", 90, new() { ["Humidity"] = new(Number: 66) }, historical: true);
+        Check((await Latest("'Humidity'")).Count == 0, "Late historical replay must not restore a removed metric.");
+        await Send("gateway", "second", 45, new() { ["Humidity"] = new(Number: 55) });
+        latest = await Latest(devices: "'first','second'");
+        Check(latest.Count == 3 && latest.Select(row => row.Time).SequenceEqual(latest.Select(row => row.Time).Order()),
+            "Each device must use its own latest sample and output must remain chronological.");
+        await Send("other", "first", 5, new() { ["Temperature"] = new(Number: 99) });
+        Check((await Latest()).Single(row => row.Metric.EndsWith("Pressure")).Value == 121
+            && (await Latest(nodes: "'latest-check/other'")).Single().Value == 99,
+            "Gateway filtering must isolate identical device IDs.");
+        await Send("gateway", "expired", 172800, new() { ["Temperature"] = new(Number: 88) });
+        Check((await Latest(devices: "'expired'")).Count == 0 && (await Latest(devices: "'unknown'")).Count == 0,
+            "Keep the 24-hour lookup and return no fabricated value for missing devices.");
+        await using var history = source.CreateCommand($"SELECT count(*) FROM readings WHERE node='{node}' AND device='first' AND metric='Humidity'");
+        Check(Convert.ToInt64(await history.ExecuteScalarAsync()) == 2, "Removed metrics must remain in historical storage.");
+        await Send("gateway", "first", 8, new() { ["Temperature"] = new(Number: 4.5), ["Pressure"] = new(Quality: MetricQuality.Stale) });
+        latest = await Latest();
+        Check(latest.Single(row => row.Metric.EndsWith("Pressure [Stale]")).Value is null
+            && latest.Single(row => row.Metric.EndsWith("Temperature")).Value == 4.5,
+            "Stale must have its own label, and quality recovery must restore the normal numeric field.");
+        foreach (var quality in new[] { "Bad", "Stale" })
+        {
+            var fieldName = $"first · Pressure [{quality}]";
+            var matches = panel.GetProperty("fieldConfig").GetProperty("overrides").EnumerateArray()
+                .Where(item => System.Text.RegularExpressions.Regex.IsMatch(fieldName, "^" + item.GetProperty("matcher").GetProperty("options").GetString()! + "$")).ToArray();
+            Check(matches.Length == 1 && matches[0].GetProperty("properties")[0].GetProperty("value").GetString() == quality + " value",
+                "The null-value override must match the actual series quality.");
+        }
+        Console.WriteLine("PASS: Latest-value query: removed/added metrics, filters, Bad/null, late replay, independent devices, gateway isolation, 24-hour lookup, history retention and chronological output.");
+    }
+
+    private static async Task CheckReplayCountsAsync(HistoryStore store, NpgsqlDataSource source)
+    {
+        var demo = new Demo.Control.SparkplugView();
+        const string node = "warehouse-01/replay-check";
+        var time = Received.AddDays(-1);
+        using var dashboard = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(FindRoot(), "grafana", "dashboards", "edge.json")));
+        var panelSql = dashboard.RootElement.GetProperty("panels").EnumerateArray().Single(panel => panel.GetProperty("id").GetInt32() == 4)
+            .GetProperty("targets")[0].GetProperty("rawSql").GetString()!;
+        async Task<long> PanelCount(string metric = "'Temperature','Humidity','Switch'", string device = "'first','second'", int fromSeconds = -1)
+        {
+            var sql = panelSql.Replace("$__timeFilter(time)", $"time BETWEEN '{time.AddSeconds(fromSeconds):O}'::timestamptz AND '{time.AddMinutes(1):O}'::timestamptz")
+                .Replace("$node", $"'{node}'").Replace("$device", device).Replace("$metric", metric);
+            await using var command = source.CreateCommand(sql);
+            return Convert.ToInt64(await command.ExecuteScalarAsync());
+        }
+        async Task Send(string kind, string device, ulong seq, bool historical, double temperature = 4.5)
+        {
+            var reading = new DeviceReading(device, seq, time.AddSeconds((long)seq), new()
+            {
+                ["Temperature"] = new(Number: temperature), ["Humidity"] = new(Number: 65), ["Switch"] = new(Boolean: true)
+            });
+            var payload = SparkplugPayloads.DeviceReading(1, reading, historical);
+            var topic = $"spBv1.0/warehouse-01/{kind}/replay-check/{device}";
+            demo.Apply(topic, payload);
+            await store.WriteAsync(SparkplugRows.From(topic, payload.ToByteArray(), Received), CancellationToken.None);
+        }
+        await Send("DBIRTH", "first", 1, false);
+        Check(await PanelCount() == 0, "An unflagged birth is not a replayed sample.");
+        await Send("DDATA", "first", 1, true);
+        await Send("DDATA", "first", 1, true);
+        Check(await PanelCount() == 1 && demo.Summaries().Sum(device => device.Historical) == 1,
+            "A three-metric replay and its retry must count once in Grafana and Demo Console.");
+        await Send("DDATA", "first", 2, false);
+        await Send("DDATA", "first", 2, true, temperature: 999);
+        await Send("DDATA", "first", 2, false);
+        Check(await PanelCount() == 2 && demo.Summaries().Sum(device => device.Historical) == 2,
+            "Live-first historical replay must count once, and later live redelivery must not clear the flag.");
+        await Send("DDATA", "first", 3, true);
+        await Send("DDATA", "second", 3, true);
+        Check(await PanelCount() == 4 && demo.Summaries().Sum(device => device.Historical) == 4,
+            "Different devices with the same DeviceSeq must count independently.");
+        Check(await PanelCount("'Temperature'") == 4 && await PanelCount(device: "'second'") == 1,
+            "Metric and device filters must count matching samples once.");
+        Check(await PanelCount(fromSeconds: 4) == 0, "Replay must still respect original measurement-time filtering.");
+        await using var values = source.CreateCommand($"SELECT count(*) FROM readings WHERE node='{node}' AND (NOT historical OR (metric='Temperature' AND value<>4.5) OR quality<>'good')");
+        Check(Convert.ToInt64(await values.ExecuteScalarAsync()) == 0, "Historical flag merge must not overwrite first-stored values or quality.");
+        Console.WriteLine("PASS: Grafana/Demo replay sample counts match across three metrics, retry duplicates, birth/live-first replay, distinct devices, filters and original-value preservation.");
     }
 
     private static async Task CheckLifecycleAsync(HistoryStore store, NpgsqlDataSource source, string connectionString)
