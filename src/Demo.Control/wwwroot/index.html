@@ -214,11 +214,12 @@
 <main>
   <header>
     <h1>IoT Demo Console</h1>
-    <span class="sub">Modbus devices → gateway (polling, SQLite outbox, Sparkplug B) → Mosquitto</span>
+    <span class="sub">Modbus devices → gateway (polling, SQLite outbox, Sparkplug B) → Mosquitto → historian → TimescaleDB / Grafana</span>
     <span class="spacer"></span>
     <span class="pill" id="monitor-pill"><span class="dot"></span><span>Connecting</span></span>
     <button class="btn primary" data-demo="start-all">Start all</button>
     <button class="btn" data-demo="stop-all">Stop all</button>
+    <a class="btn" href="http://127.0.0.1:3000" target="_blank" rel="noopener" title="Reading history and charts (TimescaleDB)">Grafana</a>
     <button class="btn danger" data-demo="reset" title="Wipes broker data and demo state, then starts everything">Reset demo</button>
   </header>
 
@@ -303,7 +304,9 @@ const CORE = {
   "configuration": { label: "Configuration", role: "Device registry · REST :5300" },
   "gateway": { label: "Gateway", role: "Modbus polling · SQLite outbox · Sparkplug edge node" },
   "mosquitto": { label: "Mosquitto", role: "Broker :8883 · TLS" },
-  "subscribers": { label: "Subscribers", role: "MQTTX · this console (persistent session)" }
+  "subscribers": { label: "Subscribers", role: "MQTTX · this console (persistent session)" },
+  "historian": { label: "Historian", role: "Sparkplug subscriber · stores every reading" },
+  "timescaledb": { label: "TimescaleDB", role: "Reading history :5433 · read by Grafana :3000" }
 };
 const TAB_NOTES = {
   upstream: "Every Sparkplug message passing through Mosquitto, decoded live, including STATE and NCMD.",
@@ -378,7 +381,8 @@ function buildPipeline() {
     </div>
     <div class="edge-col">${core("configuration")}<div class="vlink"><div class="bar" id="l-config"></div><small id="t-config">HTTP GET /config every 10 s · device list</small></div>${core("gateway")}</div>
     ${core("mosquitto", "Sparkplug B")}
-    ${core("subscribers", "Sparkplug B")}`;
+    <div class="linkwrap"><small>Sparkplug B</small><div class="link" id="l-subscribers"></div></div>
+    <div class="edge-col">${core("subscribers")}${core("historian")}<div class="vlink"><div class="bar" id="l-history"></div><small>SQL insert · Grafana reads it</small></div>${core("timescaledb")}</div>`;
 }
 
 const DEVICE_TONE = { polling: "ok", failing: "bad", offline: "bad", connecting: "idle" };
@@ -401,6 +405,8 @@ function nodeDetail(c, gw) {
       if (!gw) return "running · waiting for live status";
       return `polling ${(gw.devices ?? []).filter(isPolling).length}/${(gw.devices ?? []).length} device(s) · ${gw.upstream === "Online" ? "publishing" : "broker unreachable"} · ${gw.unsent} buffered`;
     case "configuration": return state.configurationReachable ? "serving the device list" : "starting…";
+    case "historian": return "running · writing to TimescaleDB";
+    case "timescaledb": return "running · history for Grafana";
     default: return state.monitors.upstream ? "running · persistence on" : "running · connecting";
   }
 }
@@ -437,6 +443,7 @@ function renderPipeline() {
     : registryUp ? "HTTP GET /config every 10 s · device list" : "registry unreachable · gateway using cached device list";
   if (registryUp && up.gateway && Math.floor(Date.now() / 1000) % 10 === 0) pulse("config");
   $("l-subscribers").classList.toggle("cut", !up.mosquitto);
+  $("l-history").classList.toggle("cut", !(up.historian && up.timescaledb));
   $("n-subscribers").className = "node " + (state.monitorConnected ? "ok" : "idle");
   $("d-subscribers").textContent = state.monitorConnected ? "receiving · MQTTX: subscribe to spBv1.0/#" : "waiting for Mosquitto";
 }
@@ -575,7 +582,7 @@ function renderChart(histories) {
 // Feed
 async function renderFeed() {
   const requestedTab = tab;
-  const names = ["gateway", "configuration"];
+  const names = ["gateway", "configuration", "historian"];
   $("tabnote").innerHTML = esc(TAB_NOTES[tab]) + (tab === "logs"
     ? ` <select id="log-name">${names.map(n => `<option${n === logName ? " selected" : ""}>${n}</option>`).join("")}</select>` : "");
   const feed = $("feed");

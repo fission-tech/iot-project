@@ -8,13 +8,16 @@ namespace Demo.Control;
 
 public sealed record ComponentView(string Name, string Kind, bool Running, string Status, string[] Actions);
 
-// Starts, stops and crashes every demo component: the configuration service and the gateway
-// as processes, and the Mosquitto broker as a container. Devices are external (registered in the configuration service).
+// Starts, stops and crashes every demo component: the configuration service, the gateway and the historian
+// as processes, and Mosquitto and TimescaleDB as containers. Devices are external (registered in the configuration service).
 public sealed partial class ComponentManager : IDisposable
 {
-    public const string Configuration = "configuration", Gateway = "gateway",
-        Broker = "mosquitto";
-    private static readonly Dictionary<string, string> Containers = new() { [Broker] = "dotnet-mqtt-demo-mosquitto-1" };
+    public const string Configuration = "configuration", Gateway = "gateway", Historian = "historian",
+        Broker = "mosquitto", HistoryDatabase = "timescaledb";
+    private static readonly Dictionary<string, string> Containers = new()
+    {
+        [Broker] = "dotnet-mqtt-demo-mosquitto-1", [HistoryDatabase] = "dotnet-mqtt-demo-timescaledb-1"
+    };
 
     private readonly string _workspace;
     private readonly string _state;
@@ -36,7 +39,8 @@ public sealed partial class ComponentManager : IDisposable
         _processes = new()
         {
             [Configuration] = new("EdgeGateway.Configuration", _workspace, logs),
-            [Gateway] = new("EdgeGateway.Gateway", _workspace, logs)
+            [Gateway] = new("EdgeGateway.Gateway", _workspace, logs),
+            [Historian] = new("EdgeGateway.Historian", _workspace, logs)
         };
         Activity = activity;
         _processes[Gateway].Line += activity.FromGateway;
@@ -58,7 +62,9 @@ public sealed partial class ComponentManager : IDisposable
         [
             View(Configuration, null),
             View(Gateway, gateway is null ? null : $"upstream {gateway.Value.GetProperty("upstream").GetString()}"),
-            ContainerView(Broker)
+            ContainerView(Broker),
+            View(Historian, null),
+            ContainerView(HistoryDatabase)
         ];
     }
 
@@ -127,11 +133,11 @@ public sealed partial class ComponentManager : IDisposable
         switch (action)
         {
             case "start":
-                process.Start(Arguments(name));
+                process.Start(Arguments(name), name == Historian ? HistorianEnvironment() : null);
                 break;
             case "stop":
                 // The configuration service has no stop command; ending it closes its connections.
-                await process.StopAsync(acceptsStopCommand: name is Gateway);
+                await process.StopAsync(acceptsStopCommand: name is Gateway or Historian);
                 break;
             case "crash":
                 process.Crash();
@@ -143,8 +149,8 @@ public sealed partial class ComponentManager : IDisposable
         return $"{name}: {action} done.";
     }
 
-    // Dependency order: the broker, the device registry, then the gateway,
-    // which reads its device list from the registry.
+    // Dependency order: the containers (broker, history database, Grafana), the device registry, then the gateway,
+    // which reads its device list from the registry, and the historian, which stores what reaches the broker.
     public async Task StartAllAsync()
     {
         var (code, output) = await RunAsync("docker", ["compose", "up", "-d", "--build", "--wait", "--remove-orphans"]);
@@ -153,6 +159,7 @@ public sealed partial class ComponentManager : IDisposable
         if (!_processes[Configuration].Running) await ActAsync(Configuration, "start");
         await WaitUntilAsync(ConfigurationReachableAsync);
         if (!_processes[Gateway].Running) await ActAsync(Gateway, "start");
+        if (!_processes[Historian].Running) await ActAsync(Historian, "start");
     }
 
     private static async Task WaitUntilAsync(Func<Task<bool>> ready)
@@ -163,6 +170,7 @@ public sealed partial class ComponentManager : IDisposable
     public async Task StopAllAsync()
     {
         await ActAsync(Gateway, "stop");
+        await ActAsync(Historian, "stop");
         await ActAsync(Configuration, "stop");
     }
 
@@ -186,9 +194,29 @@ public sealed partial class ComponentManager : IDisposable
         }
     }
 
+    // The historian writes to the compose TimescaleDB with the credentials from the repository's .env file.
+    private Dictionary<string, string> HistorianEnvironment()
+    {
+        var path = Path.Combine(_workspace, ".env");
+        if (!File.Exists(path)) throw new InvalidOperationException("Copy .env.example to .env and set the passwords first.");
+        var values = File.ReadAllLines(path)
+            .Select(line => line.Trim())
+            .Where(line => line.Length > 0 && !line.StartsWith('#') && line.Contains('='))
+            .Select(line => line.Split('=', 2))
+            .ToDictionary(pair => pair[0].Trim(), pair => pair[1].Trim(), StringComparer.Ordinal);
+        string Value(string key, string fallback) => values.GetValueOrDefault(key) is { Length: > 0 } value ? value : fallback;
+        return new()
+        {
+            ["Historian__ConnectionString"] = $"Host=127.0.0.1;Port={Value("HISTORY_DB_PORT", "5433")};" +
+                $"Database={Value("HISTORY_DB", "history")};Username={Value("HISTORY_DB_USER", "historian")};" +
+                $"Password={Value("HISTORY_DB_PASSWORD", "")}"
+        };
+    }
+
     private IEnumerable<string> Arguments(string name) => name switch
     {
         Configuration => [$"--Configuration:DatabasePath={Path.Combine(_state, "configuration.db")}"],
+        Historian => [],
         // No backend in this flow: an empty HostId makes the gateway publish without waiting for a primary host.
         _ => [$"--Gateway:DatabasePath={Path.Combine(_state, "outbox.db")}", "--Sparkplug:HostId=",
             $"--Daq:StateDirectory={Path.Combine(_state, "daq")}", $"--Daq:ConfigUrl={ConfigurationUrl}"]

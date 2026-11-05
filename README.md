@@ -1,6 +1,6 @@
 # IoT Project
 
-Requires .NET 8 SDK and Docker Desktop. MQTTX or MQTT Explorer to watch the broker.
+Requires .NET 8 SDK and Docker Desktop (Mosquitto, TimescaleDB and Grafana run as containers). MQTTX or MQTT Explorer to watch the broker.
 
 ```text
 EdgeGateway.Configuration (device registry, REST :5300)
@@ -10,6 +10,9 @@ Modbus devices ◄── Modbus TCP polling ── EdgeGateway.Gateway [poll →
 (ModSim, PLCs, any Modbus TCP server)               │ MQTT over TLS
                                                     ▼
                                    Mosquitto (:8883) ──► MQTTX / MQTT Explorer, demo console
+                                                    │
+                                                    ▼
+                         EdgeGateway.Historian ──► TimescaleDB (:5433) ──► Grafana (:3000)
 ```
 
 - **Devices:** any Modbus TCP server, such as ModSim or a PLC. Nothing is built in: a device exists only once it is registered in the configuration service, and its values change on the device itself.
@@ -19,6 +22,7 @@ Modbus devices ◄── Modbus TCP polling ── EdgeGateway.Gateway [poll →
   - Devices added, changed or removed in the registry apply within about 10 seconds; a changed metric list triggers a new DBIRTH.
   - Startup also reconciles saved device state: disabled/deleted devices get a DDEATH after any queued readings replay. An initial saved DBIRTH can still appear before that replay finishes.
   - If the configuration service is down, it keeps polling from its cached device list.
+- **Historian and Grafana:** the historian subscribes to Mosquitto and stores every reading in TimescaleDB at its measurement time, without duplicates. Grafana charts it from the provisioned **Edge history** dashboard. See [grafana.md](docs/grafana.md).
 
 ## Reading registers
 
@@ -72,12 +76,14 @@ This schema starts with a fresh Configuration DB; old device-registration bodies
 
 ```powershell
 ./scripts/New-LocalBrokerCertificate.ps1   # first setup only
+copy .env.example .env                       # first setup only, then set the TimescaleDB and Grafana passwords
 ./scripts/Start-Demo.ps1
 ```
 
 This opens `http://127.0.0.1:5200` (loopback only, because it starts and kills processes). **Reset demo** starts fresh: an empty broker, an empty device registry and an empty outbox, then the configuration service and the gateway. Registered devices are deleted too. No backend: the console reads Mosquitto itself with a persistent QoS 1 Sparkplug subscription, like MQTTX.
 
-- **Data path:** one box per registered device with its live polling state, plus Start, Stop and Crash for the configuration service and gateway, and Start, Stop, Restart and Crash for the broker.
+- **Data path:** one box per registered device with its live polling state, plus Start, Stop and Crash for the configuration service, gateway and historian, and Start, Stop, Restart and Crash for the broker and TimescaleDB.
+- **Grafana:** the header button opens `http://127.0.0.1:3000` (reading history, outages, replayed readings).
 - **Devices being polled:** each device's state (polling, failing, offline), endpoint, last reading and last error.
 - **Device registry tab:** add, edit, enable, disable or remove devices with a form covering every field, and see what the gateway is doing with each one: state, read frames, raw register values and the last error.
 - **Interfaces tab:** create/edit shared TCP or configuration-only RTU settings, see the number of referencing devices, and remove unused interfaces. Add Device can select an existing interface or create one inline. A new interface and device commit together; validation/conflict errors leave neither new record saved. Device editing selects an existing interface.
@@ -119,6 +125,8 @@ Demo diagnostics are written to `status.json` once per second. Temporary Windows
 
 ```powershell
 dotnet run --project tests/IoT.Checks
+# Adds the historian database checks; they reset the separate history_test database:
+# $env:HISTORIAN_TEST_CONNECTION = "Host=127.0.0.1;Port=5433;Database=history_test;Username=historian;Password=..."
 node tests/IoT.Checks/demo-status-ui.cjs
 ```
 

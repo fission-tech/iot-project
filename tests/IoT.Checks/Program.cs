@@ -62,6 +62,12 @@ BrokerHistoryChecks.Run();
     return;
 }
 
+if (args is ["--historian-only"])
+{
+    await HistorianChecks.RunAsync();
+    return;
+}
+
 if (args is ["--demo-status-only"])
 {
     DemoStatusChecks.Run();
@@ -415,3 +421,4 @@ await ErrorReportingChecks.RunAsync();
 BrokerHistoryChecks.Run();
 DemoStatusChecks.Run();
 ConfigurationMigrationChecks.Run();
+await HistorianChecks.RunAsync();

@@ -1,0 +1,9 @@
+**/bin/
+**/obj/
+.git/
+.vs/
+.env
+logs/
+state/
+broker/certs/
+appsettings.json

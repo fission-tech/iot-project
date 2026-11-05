@@ -20,5 +20,82 @@ services:
           create_host_path: false
       - mosquitto-data:/mosquitto/data
 
+  # Reading history for Grafana, written by the historian. Credentials come from .env (copy .env.example).
+  timescaledb:
+    image: timescale/timescaledb:2.17.2-pg17
+    ports:
+      # 5433 on the host, so it does not clash with a locally installed Postgres on 5432.
+      - "127.0.0.1:${HISTORY_DB_PORT:-5433}:5432"
+    environment:
+      POSTGRES_DB: ${HISTORY_DB:-history}
+      POSTGRES_USER: ${HISTORY_DB_USER:-historian}
+      POSTGRES_PASSWORD: ${HISTORY_DB_PASSWORD:?Copy .env.example to .env and set the passwords}
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:?Copy .env.example to .env and set the passwords}
+    volumes:
+      - timescale-data:/var/lib/postgresql/data
+      # Runs once, on an empty volume: creates the read-only role Grafana uses.
+      - ./history/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  grafana:
+    image: grafana/grafana-oss:11.3.0
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Copy .env.example to .env and set the passwords}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/edge.json
+      # Read by the provisioned data source.
+      HISTORY_DB: ${HISTORY_DB:-history}
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD}
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3000/api/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # On a server the historian runs here; in the local demo the console starts it as a process instead.
+  # Start with: docker compose --profile server up -d
+  historian:
+    profiles: ["server"]
+    build:
+      context: .
+      dockerfile: src/EdgeGateway/EdgeGateway.Historian/Dockerfile
+    environment:
+      Historian__ConnectionString: "Host=timescaledb;Database=${HISTORY_DB:-history};Username=${HISTORY_DB_USER:-historian};Password=${HISTORY_DB_PASSWORD}"
+      Mqtt__Host: mosquitto
+      Mqtt__Port: "8883"
+      Mqtt__UseTls: "true"
+      Mqtt__BrokerCertificatePath: /certs/broker.crt
+      # The local broker certificate is issued for localhost; a real broker certificate names its own host.
+      Mqtt__TlsServerName: localhost
+    volumes:
+      - type: bind
+        source: ./broker/certs/broker.crt
+        target: /certs/broker.crt
+        read_only: true
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
+    restart: unless-stopped
+
 volumes:
   mosquitto-data:
+  timescale-data:
+  grafana-data:

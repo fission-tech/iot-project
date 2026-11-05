@@ -11,5 +11,6 @@
     <ProjectReference Include="../../src/EdgeGateway/EdgeGateway.Gateway/EdgeGateway.Gateway.csproj" />
     <ProjectReference Include="../../src/Application.Api/Application.Api.csproj" />
     <ProjectReference Include="../../src/EdgeGateway/EdgeGateway.Configuration/EdgeGateway.Configuration.csproj" />
+    <ProjectReference Include="../../src/EdgeGateway/EdgeGateway.Historian/EdgeGateway.Historian.csproj" />
   </ItemGroup>
 </Project>

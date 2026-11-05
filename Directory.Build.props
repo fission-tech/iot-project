@@ -1,5 +1,5 @@
 <Project>
-  <ItemGroup Condition="'$(MSBuildProjectName)' == 'EdgeGateway.Gateway' Or '$(MSBuildProjectName)' == 'EdgeGateway.Configuration' Or '$(MSBuildProjectName)' == 'Demo.Control' Or '$(MSBuildProjectName)' == 'Application.Api'">
+  <ItemGroup Condition="'$(MSBuildProjectName)' == 'EdgeGateway.Gateway' Or '$(MSBuildProjectName)' == 'EdgeGateway.Configuration' Or '$(MSBuildProjectName)' == 'EdgeGateway.Historian' Or '$(MSBuildProjectName)' == 'Demo.Control' Or '$(MSBuildProjectName)' == 'Application.Api'">
     <None Include="$(MSBuildThisFileDirectory)appsettings.json" Link="appsettings.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Never" Condition="Exists('$(MSBuildThisFileDirectory)appsettings.json')" />
   </ItemGroup>
 </Project>

@@ -17,7 +17,8 @@ public sealed class ManagedProcess(string name, string workspace, string logDire
         get { lock (_gate) return _process is { HasExited: false }; }
     }
 
-    public void Start(IEnumerable<string> arguments)
+    // Environment variables carry secrets (a database password) that should not appear on the command line.
+    public void Start(IEnumerable<string> arguments, IReadOnlyDictionary<string, string>? environment = null)
     {
         lock (_gate)
         {
@@ -34,6 +35,7 @@ public sealed class ManagedProcess(string name, string workspace, string logDire
             var sourceRoot = name.StartsWith("EdgeGateway.") ? Path.Combine(workspace, "src", "EdgeGateway") : Path.Combine(workspace, "src");
             start.ArgumentList.Add(Path.Combine(sourceRoot, name, "bin", "Debug", "net8.0", name + ".dll"));
             foreach (var argument in arguments) start.ArgumentList.Add(argument);
+            foreach (var (key, value) in environment ?? new Dictionary<string, string>()) start.Environment[key] = value;
             Directory.CreateDirectory(logDirectory);
             _log?.Dispose();
             _log = new StreamWriter(Path.Combine(logDirectory, name + ".log"), append: true) { AutoFlush = true };

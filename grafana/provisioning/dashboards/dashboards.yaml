@@ -1,0 +1,10 @@
+apiVersion: 1
+
+# Dashboards are files in the repo; edits made in the Grafana UI must be exported back to grafana/dashboards.
+providers:
+  - name: edge
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards
