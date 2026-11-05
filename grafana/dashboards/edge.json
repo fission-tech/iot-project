@@ -88,7 +88,7 @@
           "format": "time_series",
           "rawQuery": true,
           "editorMode": "code",
-          "rawSql": "SELECT DISTINCT ON (device, metric) time, device || ' · ' || metric AS metric, value\nFROM readings\nWHERE time > now() - INTERVAL '1 day' AND value IS NOT NULL\n  AND node IN ($node) AND device IN ($device) AND metric IN ($metric)\nORDER BY device, metric, time DESC"
+          "rawSql": "SELECT time, metric, value\nFROM (\n  SELECT DISTINCT ON (device, metric) time, device || ' · ' || metric AS metric, value\n  FROM readings\n  WHERE time > now() - INTERVAL '1 day' AND value IS NOT NULL\n    AND node IN ($node) AND device IN ($device) AND metric IN ($metric)\n  ORDER BY device, metric, time DESC\n) latest\nORDER BY time ASC, metric"
         }
       ]
     },
