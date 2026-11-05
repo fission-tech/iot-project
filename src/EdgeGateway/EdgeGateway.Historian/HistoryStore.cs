@@ -4,7 +4,7 @@ using NpgsqlTypes;
 
 namespace EdgeGateway.Historian;
 
-// Writes Sparkplug rows to TimescaleDB. Every insert skips rows that already exist,
+// Writes Sparkplug rows to TimescaleDB. Reading inserts skip rows that already exist,
 // so QoS 1 redelivery, outbox replay and the last reading repeated in a DBIRTH never duplicate data.
 public sealed class HistoryStore(string connectionString) : IAsyncDisposable
 {

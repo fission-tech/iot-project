@@ -160,7 +160,7 @@
       "datasource": { "type": "grafana-postgresql-datasource", "uid": "history" },
       "fieldConfig": {
         "defaults": {
-          "custom": { "fillOpacity": 80, "lineWidth": 0 },
+          "custom": { "fillOpacity": 80, "lineWidth": 0, "spanNulls": true },
           "mappings": [
             { "type": "value", "options": { "1": { "text": "Online", "color": "green", "index": 0 }, "0": { "text": "Offline", "color": "red", "index": 1 } } }
           ],
@@ -176,7 +176,7 @@
           "format": "time_series",
           "rawQuery": true,
           "editorMode": "code",
-          "rawSql": "WITH devices AS (\n  SELECT DISTINCT node, device FROM device_events WHERE device <> ''\n), events AS (\n  SELECT time, node, device, kind FROM device_events WHERE device <> ''\n  UNION ALL\n  -- A gateway death takes all of its devices offline.\n  SELECT e.time, d.node, d.device, e.kind FROM device_events e JOIN devices d USING (node) WHERE e.kind = 'NDEATH'\n)\nSELECT time, device AS metric, CASE WHEN kind = 'DBIRTH' THEN 1 ELSE 0 END AS value\nFROM events\nWHERE node IN ($node) AND device IN ($device) AND time <= $__timeTo()\nORDER BY time"
+          "rawSql": "WITH devices AS (\n  SELECT DISTINCT node, device FROM device_events WHERE device <> ''\n), events AS (\n  SELECT time, node, device, kind, event_order FROM device_events WHERE device <> ''\n  UNION ALL\n  -- A gateway death takes all of its devices offline.\n  SELECT e.time, d.node, d.device, e.kind, e.event_order FROM device_events e JOIN devices d USING (node) WHERE e.kind = 'NDEATH'\n), states AS (\n  SELECT DISTINCT ON (time, node, device) time, node, device, CASE WHEN kind = 'DBIRTH' THEN 1 ELSE 0 END AS value\n  FROM events\n  WHERE node IN ($node) AND device IN ($device) AND time <= $__timeTo()\n  ORDER BY time, node, device, event_order DESC\n)\nSELECT time, device AS metric, value FROM states\nUNION ALL\n-- Extend each last observed state to the range end, including Offline.\nSELECT $__timeTo() AS time, device AS metric, value\nFROM (\n  SELECT DISTINCT ON (node, device) time, node, device, value\n  FROM states ORDER BY node, device, time DESC\n) latest\nWHERE time < $__timeTo()\nORDER BY time"
         }
       ]
     },

@@ -27,12 +27,14 @@ Grafana connects as `grafana_reader`, a login that can only read the history tab
 | Table | One row per | Columns |
 |---|---|---|
 | `readings` (hypertable, 1-day chunks) | metric per reading | `time, node, device, metric, value, quality, historical, device_seq`; key `(node, device, metric, time)` |
-| `device_events` (hypertable) | birth or death | `time, node, device, kind` (NBIRTH, NDEATH, DBIRTH, DDEATH; `device` is empty for node events) |
+| `device_events` (hypertable) | observed birth or death | `time, node, device, kind, event_order` (NBIRTH, NDEATH, DBIRTH, DDEATH; `device` is empty for node events) |
 | `readings_1m` (continuous aggregate) | metric per minute | `bucket, node, device, metric, avg, min, max, samples, bad_samples` |
 
 - `node` is `group/edge node`, e.g. `warehouse-01/gateway-01`, so several gateways or sites can share one database.
-- **Times are measurement times** from the Sparkplug payload, not arrival times. Readings the gateway replays from its outbox after an outage land where they belong. The exception is NDEATH: the broker's Will has no timestamp of its own, so it gets the arrival time.
-- **No duplicates:** inserts use `ON CONFLICT DO NOTHING` on the key, so QoS 1 redelivery and the last reading repeated in a DBIRTH are skipped.
+- **Reading times are measurement times** from the Sparkplug payload. Replayed samples keep their original time. **Lifecycle times are arrival times:** a DBIRTH containing an old saved sample still announces the device now. The online/offline timeline shows what the historian observed, not the exact outage start while it was disconnected. `event_order` resolves identical event timestamps.
+- **No duplicate readings:** inserts use `ON CONFLICT DO NOTHING` on the key, so QoS 1 redelivery and the last reading repeated in a DBIRTH are skipped. New reconnect births still create lifecycle events. Lifecycle events are recorded in observed order without session filtering.
+- Migration `003_remove_lifecycle_session.sql` removes the earlier experimental session column and its lookup index, preserving history.
+- Migration `002_lifecycle_order.sql` applies automatically on historian startup and preserves existing data. Previously misdated lifecycle events cannot be accurately repaired because their arrival times were not recorded; the corrected timeline applies to newly received events. Restart the historian with the updated build and reload the provisioned Grafana dashboard after deployment.
 - Booleans are stored as 1/0. A bad or stale metric is stored with `value` NULL and its quality. Text metrics and node data (NDATA) are not stored. `DeviceSeq` is a column, not a metric.
 
 ## Nothing is lost

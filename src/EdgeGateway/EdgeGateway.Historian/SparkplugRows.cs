@@ -28,7 +28,8 @@ public sealed record SparkplugRows(ReadingRow[] Readings, DeviceEventRow? Event)
         var payload = Payload.Parser.ParseFrom(bytes);
         // NDEATH is the broker's Will, prepared before connecting, so it has no meaningful timestamp of its own.
         var sent = payload.HasTimestamp && type != "NDEATH" ? FromMillis(payload.Timestamp) : receivedAt;
-        DeviceEventRow? lifecycle = type == "DDATA" ? null : new(sent, node, device, type);
+        // Births can contain an old saved sample. Its measurement time is not the time the device came online.
+        DeviceEventRow? lifecycle = type == "DDATA" ? null : new(receivedAt, node, device, type);
         if (type is not ("DBIRTH" or "DDATA")) return new([], lifecycle);
 
         long? deviceSeq = payload.Metrics.FirstOrDefault(metric => metric.Name == "DeviceSeq") is { HasLongValue: true } seq
