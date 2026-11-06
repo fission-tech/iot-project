@@ -1,8 +1,10 @@
 using EdgeGateway.Gateway.Sparkplug;
 using EdgeGateway.Historian;
+using EdgeGateway.Historian.Dashboards;
 using Google.Protobuf;
 using IoT.Contracts;
 using Npgsql;
+using Org.Eclipse.Tahu.Protobuf;
 
 // Historian: how Sparkplug messages become history rows, and (when a test database is given) that storing is
 // idempotent. Set HISTORIAN_TEST_CONNECTION to a TimescaleDB connection string to include the database part.
@@ -17,6 +19,7 @@ internal static class HistorianChecks
     {
         CheckMapping();
         CheckStatements();
+        CheckDeviceDashboards();
         var database = Environment.GetEnvironmentVariable("HISTORIAN_TEST_CONNECTION");
         if (string.IsNullOrWhiteSpace(database))
         {
@@ -92,7 +95,9 @@ internal static class HistorianChecks
         // Hypertables must be dropped one per statement.
         await using (var reset = NpgsqlDataSource.Create(connectionString))
             foreach (var sql in (string[])["DROP MATERIALIZED VIEW IF EXISTS readings_1m", "DROP TABLE IF EXISTS readings",
-                "DROP TABLE IF EXISTS device_events", "DROP TABLE IF EXISTS schema_version"])
+                "DROP TABLE IF EXISTS device_events", "DROP TABLE IF EXISTS device_catalog", "DROP TABLE IF EXISTS metric_catalog",
+                "DROP TABLE IF EXISTS metric_names",
+                "DROP TABLE IF EXISTS schema_version"])
             {
                 await using var command = reset.CreateCommand(sql);
                 await command.ExecuteNonQueryAsync();
@@ -138,12 +143,14 @@ internal static class HistorianChecks
         Check(await Count($"SELECT count(*) FROM readings WHERE time = '{late.UtcDateTime:O}' AND historical") == 2,
             "A late reading must be stored at its measurement time.");
         Check(await Count("SELECT count(*) FROM device_events WHERE node = 'warehouse-01/gateway-01'") == 2, "Expected one DBIRTH and one DDEATH event.");
-        Check(await Count("SELECT count(*) FROM schema_version") == 3, "Migrations recorded more than once.");
+        Check(await Count("SELECT count(*) FROM schema_version") == 5, "Migrations recorded more than once.");
         Check(await Count("SELECT count(*) FROM timescaledb_information.jobs WHERE hypertable_name IN ('readings') OR proc_name = 'policy_refresh_continuous_aggregate'") >= 3,
             "Compression, retention and rollup policies are missing.");
         await CheckLifecycleAsync(store, source, connectionString);
         await CheckReplayCountsAsync(store, source);
         await CheckLatestValuesAsync(store, source);
+        await CheckCatalogAsync(store, source);
+        await CheckMetricIdentityAsync(store, source);
     }
 
     private static async Task CheckLatestValuesAsync(HistoryStore store, NpgsqlDataSource source)
@@ -327,6 +334,204 @@ internal static class HistorianChecks
                 $"Timeline must carry both devices to the range end and preserve {lastEvent} state.");
         }
         Console.WriteLine("PASS: Lifecycle arrival order, same-sample reconnect, writer restart, Grafana timestamp ties and multi-device timeline boundaries.");
+    }
+
+    // Generated per-device dashboards: rows by register area, panel type by output, units, stable UIDs.
+    private static void CheckDeviceDashboards()
+    {
+        var birth = new Org.Eclipse.Tahu.Protobuf.Payload { Timestamp = 1, Seq = 1 };
+        birth.Metrics.Add(new Org.Eclipse.Tahu.Protobuf.Payload.Types.Metric { Name = "Pump", Datatype = (uint)Org.Eclipse.Tahu.Protobuf.DataType.Boolean, BooleanValue = true });
+        birth.Metrics.Add(new Org.Eclipse.Tahu.Protobuf.Payload.Types.Metric { Name = "Level", Datatype = (uint)Org.Eclipse.Tahu.Protobuf.DataType.Double, DoubleValue = 2 });
+        birth.Metrics.Add(new Org.Eclipse.Tahu.Protobuf.Payload.Types.Metric { Name = "Valve", Datatype = (uint)Org.Eclipse.Tahu.Protobuf.DataType.Double, IsNull = true });
+        birth.Metrics.Add(new Org.Eclipse.Tahu.Protobuf.Payload.Types.Metric { Name = "DeviceSeq", Datatype = (uint)Org.Eclipse.Tahu.Protobuf.DataType.Int64, LongValue = 5 });
+        var births = SparkplugRows.From(Prefix + "DBIRTH/gateway-01/tank", birth.ToByteArray(), Received).Births!;
+        Check(births.Length == 3 && births.Single(metric => metric.Metric == "Pump").Kind == SparkplugRows.Boolean
+            && births.Single(metric => metric.Metric == "Level").Kind == SparkplugRows.Numeric
+            && births.Single(metric => metric.Metric == "Valve").Kind is null,
+            "A birth must report boolean/numeric per metric, unknown for null values, and skip DeviceSeq.");
+        Check(SparkplugRows.From(Prefix + "DDATA/gateway-01/tank", birth.ToByteArray(), Received).Births is null, "Only births describe metrics.");
+
+        var device = new DeviceCatalog("warehouse-01/gateway-01", "Tank #1", true,
+        [
+            new("key-temperature", "Temperature", SparkplugRows.Numeric, "input", "int16", "°C", 0.1, true),
+            new("Setpoint", "Setpoint", SparkplugRows.Numeric, "holding", "float32", "bar", 1, true),
+            // A null birth value left it numeric; the registry's register area makes it boolean.
+            new("Pump", "Pump", SparkplugRows.Numeric, "coil", "bool", "", 1, true),
+            new("Raw", "Raw", SparkplugRows.Boolean, null, null, null, null, true),
+            new("O'Brien", "O'Brien", SparkplugRows.Numeric, "input", "uint16", "widgets", 1, false)
+        ]);
+        var json = System.Text.Json.Nodes.JsonNode.Parse(DashboardGenerator.Render(device))!;
+        var panels = json["panels"]!.AsArray().Select(panel => panel!).ToArray();
+        string[] rows = panels.Where(panel => (string)panel["type"]! == "row").Select(panel => (string)panel["title"]!).ToArray();
+        Check(rows.SequenceEqual(["Status", "Input registers · measurements (1)", "Holding registers · setpoints (1)", "Coils · outputs (1)",
+            "Other metrics (1)", "Removed metrics · history only (1)", "Data quality"]),
+            "Rows must follow register areas in order, omit empty areas and keep removed metrics apart: " + string.Join(" | ", rows));
+        System.Text.Json.Nodes.JsonNode Titled(string title, string type) =>
+            panels.Single(panel => (string)panel["title"]! == title && (string)panel["type"]! == type);
+        var temperature = Titled("Temperature", "timeseries")["fieldConfig"]!["defaults"]!;
+        Check((string)temperature["unit"]! == "celsius" && (int)temperature["decimals"]! == 1,
+            "A scaled int16 in °C must chart in Celsius with one decimal.");
+        Check(((string)Titled("Temperature", "timeseries")["targets"]![0]!["rawSql"]!).Contains("metric = 'key-temperature'")
+              && (string)temperature["displayName"]! == "Temperature",
+            "Panels must query by the permanent key and show the current name, so a rename keeps their history.");
+        var setpoint = Titled("Setpoint", "timeseries")["fieldConfig"]!["defaults"]!;
+        Check((string)setpoint["custom"]!["lineInterpolation"]! == "stepAfter" && (string)setpoint["unit"]! == "pressurebar"
+            && (int)setpoint["decimals"]! == 2, "Holding registers must draw stepped lines; float32 shows 2 decimals.");
+        Check(panels.Count(panel => (string)panel["title"]! == "Pump" && (string)panel["type"]! == "state-timeline") == 1
+              && panels.Count(panel => (string)panel["title"]! == "Raw" && (string)panel["type"]! == "state-timeline") == 1,
+            "Coils and boolean metrics without registry data must use state timelines.");
+        var removed = Titled("O'Brien", "timeseries");
+        Check(((string)removed["targets"]![0]!["rawSql"]!).Contains("metric = 'O''Brien'")
+              && (string)removed["fieldConfig"]!["defaults"]!["unit"]! == "suffix: widgets",
+            "Metric names must be escaped in SQL; unknown units are shown as a suffix.");
+        Check(panels.Where(panel => (string)panel["type"]! != "row").All(panel => (int)panel["gridPos"]!["x"]! + (int)panel["gridPos"]!["w"]! <= 24),
+            "Panels must fit the 24-column grid.");
+        Check(panels.Select(panel => (int)panel["id"]!).Distinct().Count() == panels.Length, "Panel IDs must be unique.");
+
+        var uid = (string)json["uid"]!;
+        Check(uid == DeviceCatalog.DashboardUid(device.Node, device.Device) && uid.Length <= 40 && uid.StartsWith("dev-tank--1-")
+              && uid != DeviceCatalog.DashboardUid("warehouse-02/gateway-01", device.Device),
+            "Dashboard UIDs must be stable, at most 40 characters, and differ per gateway.");
+        Check(DeviceCatalog.DashboardUid("n", new string('x', 200)).Length <= 40, "Long device IDs must be shortened.");
+        Check((string)json["title"]! == "Tank #1 · warehouse-01/gateway-01"
+              && (string)System.Text.Json.Nodes.JsonNode.Parse(DashboardGenerator.Render(device with { InRegistry = false }))!["title"]!
+                 == "Tank #1 · warehouse-01/gateway-01 (removed)", "A removed device keeps its dashboard, marked removed.");
+        Check(DashboardGenerator.Render(device) == DashboardGenerator.Render(device), "Rendering must be deterministic.");
+
+        var directory = Path.Combine(Path.GetTempPath(), "dashboards-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var path = Path.Combine(directory, uid + ".json");
+            Check(DashboardGenerator.WriteIfChanged(path, "a") && !DashboardGenerator.WriteIfChanged(path, "a")
+                  && DashboardGenerator.WriteIfChanged(path, "b") && File.ReadAllText(path) == "b" && !File.Exists(path + ".tmp"),
+                "Dashboards must be written atomically and only when they change.");
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+        Console.WriteLine("PASS: Device dashboards: birth kinds, register-area rows, panel type per output, stepped setpoints, units/decimals, SQL escaping, removed metrics and devices, stable UIDs, change-only atomic writes.");
+    }
+
+    // Catalog from births and the registry, and the generator writing a file per device.
+    private static async Task CheckCatalogAsync(HistoryStore store, NpgsqlDataSource source)
+    {
+        Payload Birth(bool nullPump)
+        {
+            var payload = new Payload { Timestamp = 1, Seq = 1 };
+            payload.Metrics.Add(nullPump
+                ? new Payload.Types.Metric { Name = "Pump", Datatype = (uint)DataType.Double, IsNull = true }
+                : new Payload.Types.Metric { Name = "Pump", Datatype = (uint)DataType.Boolean, BooleanValue = true });
+            payload.Metrics.Add(new Payload.Types.Metric { Name = "Level", Datatype = (uint)DataType.Double, DoubleValue = 3 });
+            return payload;
+        }
+        var topic = "spBv1.0/catalog/DBIRTH/gateway-01/tank";
+        await store.WriteAsync(SparkplugRows.From(topic, Birth(nullPump: false).ToByteArray(), Received), CancellationToken.None);
+        // A later birth with a bad (null) value must not forget that Pump is boolean.
+        await store.WriteAsync(SparkplugRows.From(topic, Birth(nullPump: true).ToByteArray(), Received.AddMinutes(1)), CancellationToken.None);
+        DeviceCatalog Tank(DeviceCatalog[] catalog) => catalog.Single(device => device.Node == "catalog/gateway-01");
+        var tank = Tank(await store.ReadCatalogAsync(CancellationToken.None));
+        Check(tank is { Device: "tank", InRegistry: true } && tank.Metrics.Length == 2
+              && tank.Metrics.Single(metric => metric.Metric == "Pump").Kind == SparkplugRows.Boolean
+              && tank.Metrics.Single(metric => metric.Metric == "Level") is { Kind: SparkplugRows.Numeric, Register: null },
+            "Births must create catalog rows and keep known kinds through null values.");
+
+        await store.ApplyRegistryAsync([new RegistryMetric("tank", "Level", "input", "float32", "%", 1)], ["tank"], CancellationToken.None);
+        tank = Tank(await store.ReadCatalogAsync(CancellationToken.None));
+        Check(tank.Metrics.Single(metric => metric.Metric == "Level") is { Register: "input", DataType: "float32", Unit: "%", InRegistry: true }
+              && tank.Metrics.Single(metric => metric.Metric == "Pump").InRegistry == false && tank.InRegistry,
+            "The registry must describe known metrics and mark metrics it no longer has.");
+        await store.ApplyRegistryAsync([], [], CancellationToken.None);
+        tank = Tank(await store.ReadCatalogAsync(CancellationToken.None));
+        Check(!tank.InRegistry && tank.Metrics.Single(metric => metric.Metric == "Level").Register == "input",
+            "A device removed from the registry is kept, marked removed, with its last description.");
+        await using (var command = source.CreateCommand("SELECT uid FROM device_catalog WHERE node = 'catalog/gateway-01'"))
+            Check((string)(await command.ExecuteScalarAsync())! == tank.Uid, "The overview links through the stored UID.");
+
+        var directory = Path.Combine(Path.GetTempPath(), "dashboards-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var generator = new DashboardGenerator(store, null, directory, TimeSpan.FromMinutes(1),
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<DashboardGenerator>.Instance);
+            File.WriteAllText(Path.Combine(Directory.CreateDirectory(generator.DevicesDirectory).FullName, "dev-gone-000000.json"), "{}");
+            await generator.SyncAsync(CancellationToken.None);
+            var file = Path.Combine(generator.DevicesDirectory, tank.Uid + ".json");
+            Check(File.Exists(file) && File.ReadAllText(file).Contains("tank · catalog/gateway-01 (removed)"),
+                "The generator must write one dashboard per catalog device.");
+            Check(!File.Exists(Path.Combine(generator.DevicesDirectory, "dev-gone-000000.json")), "Dashboards of devices no longer in the catalog are deleted.");
+            var written = File.GetLastWriteTimeUtc(file);
+            await generator.SyncAsync(CancellationToken.None);
+            Check(File.GetLastWriteTimeUtc(file) == written, "An unchanged dashboard must not be rewritten.");
+        }
+        finally { if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true); }
+        Console.WriteLine("PASS: Metric catalog: births, kind kept through null values, registry descriptions, removed metrics and devices, stored UID, generator files and stale cleanup.");
+    }
+
+    // Renames keep one history: readings are stored under a permanent key, and names (current and old) map to it.
+    private static async Task CheckMetricIdentityAsync(HistoryStore store, NpgsqlDataSource source)
+    {
+        const string node = "identity/gateway-01";
+        var start = Received.AddHours(-1);
+        ulong seq = 0;
+        async Task Send(string kind, string device, int minute, Dictionary<string, MetricValue> metrics,
+            Dictionary<string, string>? ids = null, bool historical = false)
+        {
+            var reading = new DeviceReading(device, ++seq, start.AddMinutes(minute), metrics, ids);
+            var payload = SparkplugPayloads.DeviceReading(seq, reading, historical, birth: kind == "DBIRTH");
+            await store.WriteAsync(SparkplugRows.From($"spBv1.0/identity/{kind}/gateway-01/{device}", payload.ToByteArray(),
+                start.AddMinutes(minute)), CancellationToken.None);
+        }
+        async Task<List<(string, string)>> Rows(string sql)
+        {
+            await using var command = source.CreateCommand(sql);
+            await using var reader = await command.ExecuteReaderAsync();
+            var rows = new List<(string, string)>();
+            while (await reader.ReadAsync()) rows.Add((reader.GetString(0), reader.IsDBNull(1) ? "" : reader.GetString(1)));
+            return rows;
+        }
+        Task<List<(string, string)>> Catalog(string device) => Rows(
+            $"SELECT metric || '=' || name, registry_id FROM metric_catalog WHERE node = '{node}' AND device = '{device}' ORDER BY metric COLLATE \"C\"");
+        Task<List<(string, string)>> Stored(string device) => Rows(
+            $"SELECT metric, count(*)::text FROM readings WHERE node = '{node}' AND device = '{device}' GROUP BY 1 ORDER BY metric COLLATE \"C\"");
+
+        // History from before IDs existed: the name is the key.
+        await Send("DDATA", "tank", 0, new() { ["Level"] = new(Number: 1) });
+        // The first birth with IDs adopts the existing metric (its key stays "Level") and keys the new one by its ID.
+        await Send("DBIRTH", "tank", 1, new() { ["Level"] = new(Number: 2), ["Pump"] = new(Number: 1) },
+            new() { ["Level"] = "id-level", ["Pump"] = "id-pump" });
+        Check((await Catalog("tank")).SequenceEqual([("Level=Level", "id-level"), ("id-pump=Pump", "id-pump")]),
+            "A birth must adopt an existing metric by name and key a new one by its registry ID.");
+        // Rename: the same ID under a new name keeps the key.
+        await Send("DBIRTH", "tank", 2, new() { ["TankLevel"] = new(Number: 3), ["Pump"] = new(Number: 1) },
+            new() { ["TankLevel"] = "id-level", ["Pump"] = "id-pump" });
+        await Send("DDATA", "tank", 3, new() { ["TankLevel"] = new(Number: 4), ["Pump"] = new(Number: 0) });
+        // A reading taken before the rename and replayed after it still carries the old name.
+        await Send("DDATA", "tank", 1, new() { ["Level"] = new(Number: 2) }, historical: true);
+        Check((await Catalog("tank")).SequenceEqual([("Level=TankLevel", "id-level"), ("id-pump=Pump", "id-pump")]),
+            "A rename must update the name of the same catalog row, with no new or removed metric.");
+        Check((await Stored("tank")).SequenceEqual([("Level", "4"), ("id-pump", "3")]),
+            "Readings before and after the rename (and replays under the old name) must share one key, without duplicates.");
+
+        // A rename in the registry shows before the gateway's rebirth, and data sent under the new name finds the key.
+        await store.ApplyRegistryAsync([new RegistryMetric("tank", "Fill", "input", "float32", "%", 1, "id-level"),
+            new RegistryMetric("tank", "Pump", "coil", "bool", "", 1, "id-pump"),
+            new RegistryMetric("legacy", "Temp", "holding", "int16", "°C", 0.1, "id-temp")], ["tank", "legacy"], CancellationToken.None);
+        await Send("DDATA", "tank", 4, new() { ["Fill"] = new(Number: 5) });
+        Check((await Catalog("tank"))[0] == ("Level=Fill", "id-level") && (await Stored("tank"))[0] == ("Level", "5"),
+            "A registry rename must rename the catalog row and route the new name to the same key.");
+
+        // The registry gives an existing name-keyed metric its ID, so a rename right after keeps its history.
+        await Send("DDATA", "legacy", 0, new() { ["Temp"] = new(Number: 20) });
+        await store.ApplyRegistryAsync([new RegistryMetric("legacy", "Temp", "holding", "int16", "°C", 0.1, "id-temp")], ["legacy"],
+            CancellationToken.None);
+        await Send("DBIRTH", "legacy", 1, new() { ["Temperature"] = new(Number: 21) }, new() { ["Temperature"] = "id-temp" });
+        Check((await Catalog("legacy")).SequenceEqual([("Temp=Temperature", "id-temp")]) && (await Stored("legacy")).SequenceEqual([("Temp", "2")]),
+            "The registry must adopt existing metrics by name, so a later rename keeps their history.");
+
+        // Edge nodes that send no IDs are keyed by name, as before.
+        await Send("DBIRTH", "other", 0, new() { ["X"] = new(Number: 1) });
+        Check((await Catalog("other")).SequenceEqual([("X=X", "")]), "A birth without IDs keys metrics by name.");
+        var tank = (await store.ReadCatalogAsync(CancellationToken.None)).Single(device => device.Node == node && device.Device == "tank");
+        Check(tank.Metrics.Single(metric => metric.Metric == "Level").Name == "Fill", "Dashboards get the key and the current name.");
+        Console.WriteLine("PASS: Metric identity in history: adoption by birth and registry, renames keep one key, old names from replays, registry renames, edge nodes without IDs.");
     }
 
     private static string FindRoot()

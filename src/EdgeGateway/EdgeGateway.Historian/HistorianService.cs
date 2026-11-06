@@ -11,12 +11,14 @@ namespace EdgeGateway.Historian;
 // Sparkplug subscriber that stores every reading. It keeps a persistent session with QoS 1 and acknowledges
 // a message only after it is in the database: if the write fails it disconnects without acknowledging, and the
 // broker delivers the message again on reconnect. Nothing is lost while the historian or the database is down.
-public sealed class HistorianService(HistorianSettings settings, HistoryStore store, ILogger<HistorianService> log)
+public sealed class HistorianService(HistorianSettings settings, HistoryStore store, ILogger<HistorianService> log,
+    Dashboards.DashboardGenerator? dashboards = null)
 {
-
     public async Task RunAsync(CancellationToken cancellationToken)
     {
         await MigrateWithRetryAsync(cancellationToken);
+        // Dashboards are a side job: they start once the schema exists and never hold up storing readings.
+        var dashboardTask = dashboards?.RunAsync(cancellationToken) ?? Task.CompletedTask;
         using var client = new MqttClientFactory().CreateMqttClient();
         using var certificate = LoadCertificate();
         var writeFailed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -39,6 +41,7 @@ public sealed class HistorianService(HistorianSettings settings, HistoryStore st
                 await args.AcknowledgeAsync(cancellationToken);
                 if (rows.Event is { } lifecycle)
                     log.LogInformation("{Kind} {Node} {Device}", lifecycle.Kind, lifecycle.Node, lifecycle.Device);
+                if (rows.Births is { Length: > 0 }) dashboards?.Request();
             }
             catch (Exception error) when (!cancellationToken.IsCancellationRequested)
             {
@@ -85,6 +88,7 @@ public sealed class HistorianService(HistorianSettings settings, HistoryStore st
         }
         if (client.IsConnected)
             await client.DisconnectAsync(new MqttClientDisconnectOptionsBuilder().Build(), CancellationToken.None);
+        await dashboardTask;
     }
 
     // The database may still be starting (compose, server reboot): keep trying instead of exiting.

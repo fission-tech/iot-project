@@ -10,8 +10,13 @@ public sealed record ReadingRow(DateTimeOffset Time, string Node, string Device,
 // A birth or death. Device is empty for node events (NBIRTH, NDEATH).
 public sealed record DeviceEventRow(DateTimeOffset Time, string Node, string Device, string Kind);
 
-public sealed record SparkplugRows(ReadingRow[] Readings, DeviceEventRow? Event)
+// A metric announced in a DBIRTH. Kind is null when the birth carried a null value, whose datatype says nothing.
+// RegistryId is the permanent ID from the "metricId" property, or null for edge nodes that do not send one.
+public sealed record BirthMetric(string Metric, string? Kind, string? RegistryId = null);
+
+public sealed record SparkplugRows(ReadingRow[] Readings, DeviceEventRow? Event, BirthMetric[]? Births = null)
 {
+    public const string Boolean = "boolean", Numeric = "numeric";
     public static readonly SparkplugRows None = new([], null);
 
     // Turns one Sparkplug message into rows. Times are the measurement times from the payload, so readings
@@ -41,7 +46,13 @@ public sealed record SparkplugRows(ReadingRow[] Readings, DeviceEventRow? Event)
             // Text and other non-numeric metrics have nothing to chart.
             .Where(row => row.Value is not null || row.Quality != MetricQuality.Good)
             .ToArray();
-        return new(readings, lifecycle);
+        var births = type != "DBIRTH" ? null : payload.Metrics
+            .Where(metric => metric.HasName && metric.Name != "DeviceSeq")
+            .Select(metric => new BirthMetric(metric.Name, metric.IsNull ? null
+                : metric.Datatype == (uint)DataType.Boolean || (!metric.HasDatatype && metric.HasBooleanValue) ? Boolean : Numeric,
+                SparkplugDecoder.MetricIdOf(metric)))
+            .ToArray();
+        return new(readings, lifecycle, births);
     }
 
     private static DateTimeOffset FromMillis(ulong millis) => DateTimeOffset.FromUnixTimeMilliseconds((long)millis);

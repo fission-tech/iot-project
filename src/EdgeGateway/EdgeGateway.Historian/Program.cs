@@ -3,6 +3,7 @@
 // then the command line.
 using System.Runtime.InteropServices;
 using EdgeGateway.Historian;
+using EdgeGateway.Historian.Dashboards;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
@@ -26,7 +27,13 @@ try
     var settings = configuration.Get<HistorianSettings>() ?? new HistorianSettings();
     settings.Historian.Validate();
     await using var store = new HistoryStore(settings.Historian.ConnectionString);
-    var service = new HistorianService(settings, store, loggers.CreateLogger<HistorianService>());
+    using var registry = settings.Historian.ConfigUrl is { Length: > 0 } url ? new RegistryClient(url) : null;
+    var dashboards = settings.Historian.DashboardDirectory is { Length: > 0 } directory
+        ? new DashboardGenerator(store, registry, Path.GetFullPath(directory), TimeSpan.FromSeconds(settings.Historian.DashboardRefreshSeconds),
+            loggers.CreateLogger<DashboardGenerator>())
+        : null;
+    if (dashboards is null) log.LogInformation("Historian:DashboardDirectory is not set; device dashboards are not generated.");
+    var service = new HistorianService(settings, store, loggers.CreateLogger<HistorianService>(), dashboards);
     // The demo console stops processes by writing "stop" to their input.
     _ = Task.Run(() =>
     {
