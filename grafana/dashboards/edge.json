@@ -38,7 +38,7 @@
         "label": "Metric",
         "type": "query",
         "datasource": { "type": "grafana-postgresql-datasource", "uid": "history" },
-        "query": "SELECT DISTINCT metric FROM readings_1m WHERE node IN ($node) AND device IN ($device) UNION SELECT DISTINCT metric FROM readings WHERE time > now() - INTERVAL '1 hour' AND node IN ($node) AND device IN ($device) ORDER BY 1",
+        "query": "SELECT DISTINCT name FROM metric_catalog WHERE node IN ($node) AND device IN ($device) ORDER BY 1",
         "refresh": 2,
         "multi": true,
         "includeAll": true,
@@ -48,11 +48,72 @@
   },
   "panels": [
     {
+      "id": 9,
+      "type": "table",
+      "title": "Devices",
+      "description": "Every device the historian has seen. Click a device to open its own dashboard (one panel per metric, generated from the device registry).",
+      "gridPos": { "x": 0, "y": 0, "w": 16, "h": 9 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "history" },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "cellOptions": { "type": "auto" } } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Device" },
+            "properties": [ { "id": "links", "value": [ { "title": "Open device dashboard", "url": "/d/${__data.fields.uid}?${__url_time_range}" } ] } ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Status" },
+            "properties": [
+              { "id": "custom.cellOptions", "value": { "type": "color-text" } },
+              { "id": "mappings", "value": [ { "type": "value", "options": {
+                "Online": { "color": "green", "index": 0 }, "Offline": { "color": "red", "index": 1 }, "Removed": { "color": "text", "index": 2 } } } ] }
+            ]
+          },
+          { "matcher": { "id": "byName", "options": "Last reading" }, "properties": [ { "id": "unit", "value": "dateTimeFromNow" } ] },
+          {
+            "matcher": { "id": "byName", "options": "Bad in range" },
+            "properties": [
+              { "id": "custom.cellOptions", "value": { "type": "color-text" } },
+              { "id": "thresholds", "value": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } }
+            ]
+          },
+          { "matcher": { "id": "byName", "options": "uid" }, "properties": [ { "id": "custom.hidden", "value": true } ] }
+        ]
+      },
+      "options": { "showHeader": true, "cellHeight": "sm" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT d.device AS \"Device\", d.node AS \"Gateway\",\n  CASE WHEN NOT d.in_registry THEN 'Removed' WHEN s.kind = 'DBIRTH' THEN 'Online' ELSE 'Offline' END AS \"Status\",\n  (SELECT extract(epoch FROM max(r.time)) * 1000 FROM readings r WHERE r.node = d.node AND r.device = d.device AND r.time > now() - INTERVAL '30 days') AS \"Last reading\",\n  (SELECT count(*) FROM metric_catalog m WHERE m.node = d.node AND m.device = d.device AND (m.in_registry OR NOT d.in_registry)) AS \"Metrics\",\n  (SELECT count(*) FROM readings r WHERE r.node = d.node AND r.device = d.device AND $__timeFilter(r.time) AND r.quality <> 'good') AS \"Bad in range\",\n  d.uid\nFROM device_catalog d\n-- Latest lifecycle event for the device: its own birth or death, or its gateway's death.\nLEFT JOIN LATERAL (\n  SELECT e.kind FROM device_events e\n  WHERE e.node = d.node AND ((e.device = d.device AND e.kind IN ('DBIRTH', 'DDEATH')) OR (e.device = '' AND e.kind = 'NDEATH'))\n  ORDER BY e.time DESC, e.event_order DESC LIMIT 1\n) s ON true\nWHERE d.node IN ($node) AND d.device IN ($device)\nORDER BY 1, 2"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "dashlist",
+      "title": "Device dashboards",
+      "gridPos": { "x": 16, "y": 0, "w": 8, "h": 9 },
+      "options": {
+        "showStarred": false,
+        "showRecentlyViewed": false,
+        "showSearch": true,
+        "showHeadings": false,
+        "includeVars": false,
+        "keepTime": true,
+        "maxItems": 100,
+        "query": "",
+        "tags": ["device"]
+      }
+    },
+    {
       "id": 1,
       "type": "timeseries",
       "title": "Readings",
       "description": "Average per interval. Up to 1 day it reads the raw readings; longer ranges read the 1-minute rollups.",
-      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 10 },
+      "gridPos": { "x": 0, "y": 9, "w": 24, "h": 10 },
       "datasource": { "type": "grafana-postgresql-datasource", "uid": "history" },
       "fieldConfig": {
         "defaults": { "custom": { "lineWidth": 2, "spanNulls": false, "showPoints": "auto" } },
@@ -65,7 +126,7 @@
           "format": "time_series",
           "rawQuery": true,
           "editorMode": "code",
-          "rawSql": "SELECT $__timeGroupAlias(time, $__interval), device || ' · ' || metric AS metric, avg(value) AS value\nFROM readings\nWHERE $__timeFilter(time) AND node IN ($node) AND device IN ($device) AND metric IN ($metric)\n  AND $__timeTo()::timestamptz - $__timeFrom()::timestamptz <= INTERVAL '1 day'\nGROUP BY 1, 2\nUNION ALL\nSELECT $__timeGroupAlias(bucket, $__interval), device || ' · ' || metric AS metric, sum(avg * samples) / nullif(sum(samples), 0) AS value\nFROM readings_1m\nWHERE $__timeFilter(bucket) AND node IN ($node) AND device IN ($device) AND metric IN ($metric)\n  AND $__timeTo()::timestamptz - $__timeFrom()::timestamptz > INTERVAL '1 day'\nGROUP BY 1, 2\nORDER BY 1"
+          "rawSql": "SELECT $__timeGroupAlias(time, $__interval), device || ' · ' || c.name AS metric, avg(value) AS value\nFROM readings JOIN metric_catalog c USING (node, device, metric)\nWHERE $__timeFilter(time) AND node IN ($node) AND device IN ($device) AND c.name IN ($metric)\n  AND $__timeTo()::timestamptz - $__timeFrom()::timestamptz <= INTERVAL '1 day'\nGROUP BY 1, 2\nUNION ALL\nSELECT $__timeGroupAlias(bucket, $__interval), device || ' · ' || c.name AS metric, sum(avg * samples) / nullif(sum(samples), 0) AS value\nFROM readings_1m JOIN metric_catalog c USING (node, device, metric)\nWHERE $__timeFilter(bucket) AND node IN ($node) AND device IN ($device) AND c.name IN ($metric)\n  AND $__timeTo()::timestamptz - $__timeFrom()::timestamptz > INTERVAL '1 day'\nGROUP BY 1, 2\nORDER BY 1"
         }
       ]
     },
@@ -80,7 +141,7 @@
           { "matcher": { "id": "byRegexp", "options": ".*\\[Stale\\]$" }, "properties": [ { "id": "noValue", "value": "Stale value" } ] }
         ]
       },
-      "gridPos": { "x": 0, "y": 10, "w": 12, "h": 5 },
+      "gridPos": { "x": 0, "y": 19, "w": 12, "h": 5 },
       "datasource": { "type": "grafana-postgresql-datasource", "uid": "history" },
       "options": {
         "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
@@ -95,7 +156,7 @@
           "format": "time_series",
           "rawQuery": true,
           "editorMode": "code",
-          "rawSql": "WITH latest_sample AS (\n  SELECT node, device, MAX(time) AS time\n  FROM readings\n  WHERE time > now() - INTERVAL '1 day'\n    AND node IN ($node)\n    AND device IN ($device)\n  GROUP BY node, device\n)\nSELECT r.time, r.device || ' · ' || r.metric || CASE r.quality WHEN 'bad' THEN ' [Bad]' WHEN 'stale' THEN ' [Stale]' ELSE '' END AS metric, r.value\nFROM readings r\nJOIN latest_sample s USING (node, device, time)\nWHERE r.metric IN ($metric)\nORDER BY r.time ASC, metric"
+          "rawSql": "WITH latest_sample AS (\n  SELECT node, device, MAX(time) AS time\n  FROM readings\n  WHERE time > now() - INTERVAL '1 day'\n    AND node IN ($node)\n    AND device IN ($device)\n  GROUP BY node, device\n)\nSELECT r.time, r.device || ' · ' || c.name || CASE r.quality WHEN 'bad' THEN ' [Bad]' WHEN 'stale' THEN ' [Stale]' ELSE '' END AS metric, r.value\nFROM readings r\nJOIN latest_sample s USING (node, device, time)\nJOIN metric_catalog c USING (node, device, metric)\nWHERE c.name IN ($metric)\nORDER BY r.time ASC, metric"
         }
       ]
     },
@@ -104,7 +165,7 @@
       "type": "stat",
       "title": "Bad or stale readings",
       "description": "Readings in the selected range whose quality is not good (device unreachable, invalid value).",
-      "gridPos": { "x": 12, "y": 10, "w": 4, "h": 5 },
+      "gridPos": { "x": 12, "y": 19, "w": 4, "h": 5 },
       "datasource": { "type": "grafana-postgresql-datasource", "uid": "history" },
       "fieldConfig": {
         "defaults": {
@@ -119,7 +180,7 @@
           "format": "table",
           "rawQuery": true,
           "editorMode": "code",
-          "rawSql": "SELECT count(*) AS \"bad readings\"\nFROM readings\nWHERE $__timeFilter(time) AND quality <> 'good'\n  AND node IN ($node) AND device IN ($device) AND metric IN ($metric)"
+          "rawSql": "SELECT count(*) AS \"bad readings\"\nFROM readings JOIN metric_catalog c USING (node, device, metric)\nWHERE $__timeFilter(time) AND quality <> 'good'\n  AND node IN ($node) AND device IN ($device) AND c.name IN ($metric)"
         }
       ]
     },
@@ -128,7 +189,7 @@
       "type": "stat",
       "title": "Replayed device samples",
       "description": "Unique device samples received as historical, counted once across metrics and retries. Filtered by original measurement time and selected devices/metrics.",
-      "gridPos": { "x": 16, "y": 10, "w": 4, "h": 5 },
+      "gridPos": { "x": 16, "y": 19, "w": 4, "h": 5 },
       "datasource": { "type": "grafana-postgresql-datasource", "uid": "history" },
       "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "none", "graphMode": "none" },
       "targets": [
@@ -137,7 +198,7 @@
           "format": "table",
           "rawQuery": true,
           "editorMode": "code",
-          "rawSql": "SELECT count(DISTINCT (node, device, device_seq, time)) AS replayed\nFROM readings\nWHERE $__timeFilter(time) AND historical\n  AND node IN ($node) AND device IN ($device) AND metric IN ($metric)"
+          "rawSql": "SELECT count(DISTINCT (node, device, device_seq, time)) AS replayed\nFROM readings JOIN metric_catalog c USING (node, device, metric)\nWHERE $__timeFilter(time) AND historical\n  AND node IN ($node) AND device IN ($device) AND c.name IN ($metric)"
         }
       ]
     },
@@ -145,7 +206,7 @@
       "id": 5,
       "type": "stat",
       "title": "Readings stored",
-      "gridPos": { "x": 20, "y": 10, "w": 4, "h": 5 },
+      "gridPos": { "x": 20, "y": 19, "w": 4, "h": 5 },
       "datasource": { "type": "grafana-postgresql-datasource", "uid": "history" },
       "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "none", "graphMode": "none" },
       "targets": [
@@ -154,7 +215,7 @@
           "format": "table",
           "rawQuery": true,
           "editorMode": "code",
-          "rawSql": "SELECT count(*) AS readings\nFROM readings\nWHERE $__timeFilter(time)\n  AND node IN ($node) AND device IN ($device) AND metric IN ($metric)"
+          "rawSql": "SELECT count(*) AS readings\nFROM readings JOIN metric_catalog c USING (node, device, metric)\nWHERE $__timeFilter(time)\n  AND node IN ($node) AND device IN ($device) AND c.name IN ($metric)"
         }
       ]
     },
@@ -163,7 +224,7 @@
       "type": "state-timeline",
       "title": "Device online / offline",
       "description": "From the Sparkplug births and deaths: DBIRTH = online; DDEATH, or the gateway's NDEATH = offline.",
-      "gridPos": { "x": 0, "y": 15, "w": 24, "h": 6 },
+      "gridPos": { "x": 0, "y": 24, "w": 24, "h": 6 },
       "datasource": { "type": "grafana-postgresql-datasource", "uid": "history" },
       "fieldConfig": {
         "defaults": {
@@ -192,7 +253,7 @@
       "type": "timeseries",
       "title": "Live vs replayed readings",
       "description": "Readings per interval by measurement time. Replayed readings fill the period the broker was unreachable.",
-      "gridPos": { "x": 0, "y": 21, "w": 14, "h": 8 },
+      "gridPos": { "x": 0, "y": 30, "w": 14, "h": 8 },
       "datasource": { "type": "grafana-postgresql-datasource", "uid": "history" },
       "fieldConfig": {
         "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 80, "stacking": { "mode": "normal" }, "lineWidth": 0 } },
@@ -208,7 +269,7 @@
           "format": "time_series",
           "rawQuery": true,
           "editorMode": "code",
-          "rawSql": "SELECT $__timeGroupAlias(time, $__interval), count(*) FILTER (WHERE NOT historical) AS live, count(*) FILTER (WHERE historical) AS replayed\nFROM readings\nWHERE $__timeFilter(time) AND node IN ($node) AND device IN ($device) AND metric IN ($metric)\nGROUP BY 1\nORDER BY 1"
+          "rawSql": "SELECT $__timeGroupAlias(time, $__interval), count(*) FILTER (WHERE NOT historical) AS live, count(*) FILTER (WHERE historical) AS replayed\nFROM readings JOIN metric_catalog c USING (node, device, metric)\nWHERE $__timeFilter(time) AND node IN ($node) AND device IN ($device) AND c.name IN ($metric)\nGROUP BY 1\nORDER BY 1"
         }
       ]
     },
@@ -216,7 +277,7 @@
       "id": 8,
       "type": "table",
       "title": "Latest bad or stale readings",
-      "gridPos": { "x": 14, "y": 21, "w": 10, "h": 8 },
+      "gridPos": { "x": 14, "y": 30, "w": 10, "h": 8 },
       "datasource": { "type": "grafana-postgresql-datasource", "uid": "history" },
       "options": { "showHeader": true },
       "targets": [
@@ -225,7 +286,7 @@
           "format": "table",
           "rawQuery": true,
           "editorMode": "code",
-          "rawSql": "SELECT time, device, metric, quality\nFROM readings\nWHERE $__timeFilter(time) AND quality <> 'good'\n  AND node IN ($node) AND device IN ($device) AND metric IN ($metric)\nORDER BY time DESC\nLIMIT 50"
+          "rawSql": "SELECT time, device, c.name AS metric, quality\nFROM readings JOIN metric_catalog c USING (node, device, metric)\nWHERE $__timeFilter(time) AND quality <> 'good'\n  AND node IN ($node) AND device IN ($device) AND c.name IN ($metric)\nORDER BY time DESC\nLIMIT 50"
         }
       ]
     }
