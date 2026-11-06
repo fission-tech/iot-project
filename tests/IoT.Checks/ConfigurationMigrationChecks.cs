@@ -62,17 +62,25 @@ internal static class ConfigurationMigrationChecks
             var json = (string)Sql(existing, "SELECT Data FROM Devices WHERE Id='meter-01'")!;
             using (var store = new DeviceStore(existing))
             {
-                Check(store.Snapshot() is { Version: 17, Devices.Length: 1 }, "adoption reset config/version");
+                // Adoption keeps the registration; the only change is a permanent ID per metric, with one version bump.
+                Check(store.Snapshot() is { Version: 18, Devices.Length: 1 }, "adoption reset config/version");
                 Check(store.Find("meter-01") is { InterfaceId: "tcp-01", UnitId: 1 }, "existing registration changed");
-                Check((string)Sql(existing, "SELECT Data FROM Devices WHERE Id='meter-01'")! == json, "adoption rewrote JSON");
+                var adopted = System.Text.Json.Nodes.JsonNode.Parse((string)Sql(existing, "SELECT Data FROM Devices WHERE Id='meter-01'")!)!;
+                Check(adopted["metrics"]![0]!["id"]!.GetValue<string>().Length == 32, "adoption did not assign metric IDs");
+                adopted["metrics"]![0]!.AsObject().Remove("id");
+                var original = System.Text.Json.Nodes.JsonNode.Parse(json)!;
+                foreach (var (key, value) in adopted["metrics"]![0]!.AsObject().ToArray())
+                    if (original["metrics"]![0]![key] is null && value is not null) adopted["metrics"]![0]!.AsObject().Remove(key);
+                Check(System.Text.Json.Nodes.JsonNode.DeepEquals(adopted["metrics"]![0], original["metrics"]![0])
+                      && adopted["description"]!.GetValue<string>() == "Panel meter", "adoption rewrote existing fields");
                 Check((long)Sql(existing, "SELECT COUNT(*) FROM __EFMigrationsHistory")! == 3, "adoption not recorded");
                 Check(store.Save(store.Find("meter-01")! with { Enabled = false }, false), "existing device update failed");
-                Check(store.Snapshot().Version == 18, "version bump changed");
+                Check(store.Snapshot().Version == 19, "version bump changed");
                 try { store.DeleteInterface("tcp-01"); throw new Exception("Referenced interface removed"); }
                 catch (ConfigurationConflictException) { }
             }
             using (var store = new DeviceStore(existing))
-                Check(store.Snapshot() is { Version: 18, Devices.Length: 0 }, "repeat startup reset data/version");
+                Check(store.Snapshot() is { Version: 19, Devices.Length: 0 }, "repeat startup reset data/version");
             Check((string)Sql(existing, "PRAGMA integrity_check")! == "ok", "integrity failed");
             Check(Sql(existing, "PRAGMA foreign_key_check") is null, "FK integrity failed");
 

@@ -18,6 +18,8 @@ public sealed record DeviceRegistration(
         if (Metrics.Any(metric => metric is null)) throw new ArgumentException("Metrics must not contain null entries.");
         if (Metrics.Select(metric => metric.Name).Distinct(StringComparer.Ordinal).Count() != Metrics.Length)
             throw new ArgumentException("Metric names must be unique.");
+        var ids = Metrics.Where(metric => metric.Id is not null).Select(metric => metric.Id).ToArray();
+        if (ids.Distinct(StringComparer.Ordinal).Count() != ids.Length) throw new ArgumentException("Metric IDs must be unique.");
         foreach (var metric in Metrics) metric.Validate();
     }
 
@@ -46,9 +48,11 @@ public sealed record DeviceDefinition(
 
 // Where a value lives on the device and how to turn the raw register(s) into an engineering value:
 // value = decoded(DataType, WordOrder) × Scale. 32-bit types span two consecutive registers.
+// Id is the metric's permanent identity, assigned by the registry: renaming a metric keeps its Id, so its history
+// continues. Sparkplug still publishes the name; the Id travels as a property in DBIRTH.
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record MetricDefinition(string Name, string Register, [property: JsonRequired] ushort Address, double Scale, string Unit,
-    string? DataType = null, string? WordOrder = null)
+    string? DataType = null, string? WordOrder = null, string? Id = null)
 {
     public static readonly string[] Registers = ["holding", "input", "coil", "discrete"];
     public static readonly string[] RegisterTypes = ["int16", "uint16", "int32", "uint32", "float32"];
@@ -65,6 +69,8 @@ public sealed record MetricDefinition(string Name, string Register, [property: J
     {
         if (string.IsNullOrWhiteSpace(Name) || Name is "bdSeq" or "DeviceSeq" or "GpioPin")
             throw new ArgumentException($"Invalid metric name '{Name}'.");
+        if (Id is not null && (Id.Length is 0 or > 64 || Id.Any(char.IsWhiteSpace)))
+            throw new ArgumentException($"Metric {Name}: ID must be 1–64 characters without whitespace.");
         if (!Registers.Contains(Register))
             throw new ArgumentException($"Metric {Name}: register must be one of {string.Join(", ", Registers)}.");
         if (IsBit ? Type != "bool" : !RegisterTypes.Contains(Type))

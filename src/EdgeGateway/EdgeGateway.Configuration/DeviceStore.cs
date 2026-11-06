@@ -35,6 +35,7 @@ public sealed class DeviceStore : IDisposable
                 .UseSqlite(_connection).Options);
             database.Database.Migrate();
             Execute("PRAGMA journal_mode = WAL;");
+            AssignMissingMetricIds();
         }
         catch { _connection.Dispose(); throw; }
     }
@@ -130,8 +131,9 @@ public sealed class DeviceStore : IDisposable
         lock (_gate)
         {
             using var transaction = _connection.BeginTransaction();
-            var exists = Scalar("SELECT 1 FROM Devices WHERE Id = $id", transaction, ("$id", device.Id)) is not null;
-            if (exists == create) return false;
+            var stored = Scalar("SELECT Data FROM Devices WHERE Id = $id", transaction, ("$id", device.Id)) as string;
+            if ((stored is not null) == create) return false;
+            device = device with { Metrics = WithIds(device.Metrics, stored is null ? [] : ReadData(stored).Metrics) };
             var connection = newInterface ?? FindInterface(device.InterfaceId, transaction)
                 ?? throw new ArgumentException($"Interface {device.InterfaceId} does not exist.");
             ValidateConnection(device, connection);
@@ -322,9 +324,46 @@ public sealed class DeviceStore : IDisposable
 
     private sealed record DeviceData(bool Enabled, byte UnitId, int PollIntervalSeconds, int? GpioPin, string Description, MetricDefinition[] Metrics);
 
+    private static DeviceData ReadData(string json) => JsonSerializer.Deserialize<DeviceData>(json, EdgeTopics.Json)!;
+
+    // Every stored metric has a permanent ID. A metric sent with its ID keeps it, which is how a rename keeps its
+    // history; one sent without an ID takes the stored ID of the same name, else a new one.
+    private static MetricDefinition[] WithIds(MetricDefinition[] metrics, MetricDefinition[] stored)
+    {
+        var claimed = metrics.Where(metric => metric.Id is not null).Select(metric => metric.Id!).ToHashSet(StringComparer.Ordinal);
+        return metrics.Select(metric => metric.Id is not null ? metric : metric with
+        {
+            Id = stored.FirstOrDefault(old => old.Name == metric.Name && old.Id is not null && claimed.Add(old.Id))?.Id
+                ?? Guid.NewGuid().ToString("N")
+        }).ToArray();
+    }
+
+    // Devices saved before metric IDs existed get them once, with one version bump so the gateway picks them up.
+    private void AssignMissingMetricIds()
+    {
+        using var transaction = _connection.BeginTransaction();
+        var updates = new List<(string Id, DeviceData Data)>();
+        using (var command = Command("SELECT Id, Data FROM Devices", transaction))
+        using (var reader = command.ExecuteReader())
+        {
+            while (reader.Read())
+            {
+                var data = ReadData(reader.GetString(1));
+                if (data.Metrics.All(metric => metric.Id is not null)) continue;
+                updates.Add((reader.GetString(0), data with { Metrics = WithIds(data.Metrics, []) }));
+            }
+        }
+        if (updates.Count == 0) return;
+        foreach (var (id, data) in updates)
+            Execute("UPDATE Devices SET Data = $data WHERE Id = $id", transaction,
+                ("$id", id), ("$data", JsonSerializer.Serialize(data, EdgeTopics.Json)));
+        BumpVersion(transaction);
+        transaction.Commit();
+    }
+
     private static DeviceRegistration ReadDevice(SqliteDataReader reader)
     {
-        var data = JsonSerializer.Deserialize<DeviceData>(reader.GetString(2), EdgeTopics.Json)!;
+        var data = ReadData(reader.GetString(2));
         return new(reader.GetString(0), reader.GetString(1), data.Enabled, data.UnitId, data.PollIntervalSeconds, data.GpioPin, data.Description, data.Metrics);
     }
 

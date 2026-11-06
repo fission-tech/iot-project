@@ -735,7 +735,8 @@ function metricRow(m = {}) {
   const types = isBit(register) ? ["bool"] : REGISTER_TYPES;
   const type = m.dataType && types.includes(m.dataType) ? m.dataType : types[0];
   const option = (value, current) => `<option${value === current ? " selected" : ""}>${value}</option>`;
-  return `<div class="mrow">
+  // data-id carries the metric's permanent ID, so renaming it here keeps its history.
+  return `<div class="mrow" data-id="${esc(m.id ?? "")}">
     <input data-m="name" value="${esc(m.name ?? "")}" placeholder="Name" aria-label="Metric name">
     <select data-m="register" aria-label="Modbus area">${["holding", "input", "coil", "discrete"].map(r => option(r, register)).join("")}</select>
     <input data-m="address" type="number" min="0" max="65535" value="${esc(m.address ?? 0)}" aria-label="Register address">
@@ -820,7 +821,7 @@ function readDeviceForm() {
       const address = get("address").value.trim();
       if (address === "") throw new Error(`${get("name").value.trim() || "Metric"}: address is required.`);
       return {
-        name: get("name").value.trim(), register: get("register").value, address: Number(address),
+        id: row.dataset.id || null, name: get("name").value.trim(), register: get("register").value, address: Number(address),
         scale: Number(get("scale").value), unit: get("unit").value.trim(), dataType,
         wordOrder: ["int32", "uint32", "float32"].includes(dataType) ? get("wordOrder").value : null
       };
