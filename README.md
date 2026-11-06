@@ -22,7 +22,7 @@ Modbus devices ◄── Modbus TCP polling ── EdgeGateway.Gateway [poll →
   - Devices added, changed or removed in the registry apply within about 10 seconds; a changed metric list triggers a new DBIRTH.
   - Startup also reconciles saved device state: disabled/deleted devices get a DDEATH after any queued readings replay. An initial saved DBIRTH can still appear before that replay finishes.
   - If the configuration service is down, it keeps polling from its cached device list.
-- **Historian and Grafana:** the historian subscribes to Mosquitto and stores every reading in TimescaleDB at its measurement time, without duplicates. Grafana charts it from the provisioned **Edge history** dashboard. See [grafana.md](docs/grafana.md).
+- **Historian and Grafana:** the historian subscribes to Mosquitto and stores every reading in TimescaleDB at its measurement time, without duplicates. Grafana shows a fleet overview (**Edge history**) and one generated dashboard per device, with a panel per metric chosen by register area and boolean/numeric output. See [grafana.md](docs/grafana.md).
 
 ## Reading registers
 
@@ -35,6 +35,7 @@ Each metric in the registry says where its value lives and how to decode it:
 | `dataType` | `int16` (default), `uint16`, `int32`, `uint32`, `float32` for registers; `bool` for bits |
 | `wordOrder` | 32-bit types span two registers: `big` (default, high word first) or `little` (word-swapped devices) |
 | `scale`, `unit` | value = decoded × scale, e.g. `0.1` for a register holding tenths |
+| `id` | permanent metric ID, assigned by the registry. Optional on writes. To rename a metric, send its `id` with the new `name`; a metric sent without an `id` keeps the ID of the same name, or gets a new one. See [Metric identity](docs/grafana.md#metric-identity-renames-keep-history) |
 
 Gateway logs use .NET `ILogger` with a concise `[INFO]`/`[WARN]` console format, date/time without a timezone offset, and concise frame/metric errors and recovery messages. Routine readings and publishes are DEBUG; use `--Logging:LogLevel:Default=Debug` for details. See [Gateway error reporting](docs/gateway-error-reporting.md) for examples, a before/after summary and checks.
 
