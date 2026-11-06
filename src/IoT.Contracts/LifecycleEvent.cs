@@ -22,3 +22,10 @@ public static class MetricQuality
 
     public static string FromCode(int code) => code switch { 0 => Bad, 500 => Stale, _ => Good };
 }
+
+// A metric's permanent registry ID, sent as a string property on each DBIRTH metric. The name stays the
+// Sparkplug metric name; consumers that do not know this property ignore it.
+public static class MetricIdentity
+{
+    public const string PropertyName = "metricId";
+}

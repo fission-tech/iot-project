@@ -28,6 +28,10 @@ public sealed class ModbusPoller(DeviceDefinition device, DaqSettings settings, 
     private readonly ILogger<ModbusPoller> _log = logger ?? NullLogger<ModbusPoller>.Instance;
     private readonly DeviceSequenceStore _sequence = new(device.Id, settings.StateDirectory);
     private readonly ModbusFrame[] _frames = ModbusFrames.Plan(device.Metrics);
+    // Stored with every reading, so a birth replayed later names the IDs configured when the reading was taken.
+    private readonly Dictionary<string, string>? _metricIds = device.Metrics.Any(metric => metric.Id is not null)
+        ? device.Metrics.Where(metric => metric.Id is not null).ToDictionary(metric => metric.Name, metric => metric.Id!, StringComparer.Ordinal)
+        : null;
     private int _failures;
     private bool? _online;
     private volatile PollerStatus? _status;
@@ -120,7 +124,7 @@ public sealed class ModbusPoller(DeviceDefinition device, DaqSettings settings, 
         var saved = SaveWithRetry(() =>
         {
             // Allocate once: an outbox retry keeps the same sequence, values and source timestamp.
-            reading ??= new(device.Id, _sequence.Next(), sampledAt, metrics);
+            reading ??= new(device.Id, _sequence.Next(), sampledAt, metrics, _metricIds);
             outbox.AcceptReading(reading);
         }, "reading", cancellationToken);
         if (saved)

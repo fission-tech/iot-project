@@ -25,6 +25,15 @@ public sealed class SparkplugDecoder
             : MetricQuality.Good;
     }
 
+    // The permanent registry ID announced in a birth, or null for metrics without one (e.g. other edge nodes).
+    public static string? MetricIdOf(Payload.Types.Metric metric)
+    {
+        var index = metric.Properties?.Keys.IndexOf(MetricIdentity.PropertyName) ?? -1;
+        return index >= 0 && index < metric.Properties!.Values.Count && metric.Properties.Values[index].HasStringValue
+            ? metric.Properties.Values[index].StringValue
+            : null;
+    }
+
     // Out-of-sync messages (missing birth, sequence gap) are still returned so the caller can store them,
     // with needsRebirth set so the host asks the edge node to resynchronize.
     public LifecycleEvent Decode(string topic, byte[] bytes, out bool needsRebirth)

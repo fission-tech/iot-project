@@ -4,8 +4,9 @@ namespace IoT.Contracts;
 
 // One poll of one device. DeviceSeq is assigned and persisted by data acquisition and never repeats,
 // so it identifies a reading end to end. Metric names and meanings come from the device's configuration.
+// MetricIds maps each metric name to its permanent registry ID, as configured when the reading was taken.
 public sealed record DeviceReading(string DeviceId, ulong DeviceSeq, DateTimeOffset Timestamp,
-    Dictionary<string, MetricValue> Metrics)
+    Dictionary<string, MetricValue> Metrics, Dictionary<string, string>? MetricIds = null)
 {
     public void Validate()
     {
@@ -33,8 +34,9 @@ public sealed record DeviceReading(string DeviceId, ulong DeviceSeq, DateTimeOff
         }
     }
 
-    // A metric list change means the device must be born again with its new definition.
-    public string MetricSignature() => string.Join(",", Metrics.Keys.Order(StringComparer.Ordinal));
+    // A metric list change (a name or a permanent ID) means the device must be born again with its new definition.
+    public string MetricSignature() => string.Join(",", Metrics.Keys.Order(StringComparer.Ordinal)
+        .Select(name => MetricIds?.GetValueOrDefault(name) is { } id ? $"{name}={id}" : name));
 }
 
 public static class EdgeTopics

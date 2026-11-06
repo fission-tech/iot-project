@@ -259,7 +259,7 @@ public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, Gate
         var (topic, payload) = row.Kind switch
         {
             "DBIRTH" => (SparkplugTopics.DeviceBirth(settings.Sparkplug, row.DeviceId),
-                SparkplugPayloads.DeviceReading(sequence, row.Reading!)),
+                SparkplugPayloads.DeviceReading(sequence, row.Reading!, birth: true)),
             "DDATA" => (SparkplugTopics.DeviceData(settings.Sparkplug, row.DeviceId),
                 SparkplugPayloads.DeviceReading(sequence, row.Reading!, historical)),
             "DDEATH" => (SparkplugTopics.DeviceDeath(settings.Sparkplug, row.DeviceId),
@@ -295,7 +295,7 @@ public sealed class GatewayRunner(MqttConnection connection, Outbox outbox, Gate
         {
             var current = sequence.Next();
             var topic = SparkplugTopics.DeviceBirth(settings.Sparkplug, reading.DeviceId);
-            await connection.PublishAsync(topic, SparkplugPayloads.DeviceReading(current, reading).ToByteArray(),
+            await connection.PublishAsync(topic, SparkplugPayloads.DeviceReading(current, reading, birth: true).ToByteArray(),
                 cancellationToken, MqttQualityOfServiceLevel.AtLeastOnce);
             _log.LogInformation("Published DBIRTH: {Topic} (seq {Sequence})", topic, current);
         }

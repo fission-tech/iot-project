@@ -62,6 +62,12 @@ BrokerHistoryChecks.Run();
     return;
 }
 
+if (args is ["--metric-identity-only"])
+{
+    MetricIdentityChecks.Run();
+    return;
+}
+
 if (args is ["--historian-only"])
 {
     await HistorianChecks.RunAsync();
@@ -421,4 +427,5 @@ await ErrorReportingChecks.RunAsync();
 BrokerHistoryChecks.Run();
 DemoStatusChecks.Run();
 ConfigurationMigrationChecks.Run();
+MetricIdentityChecks.Run();
 await HistorianChecks.RunAsync();

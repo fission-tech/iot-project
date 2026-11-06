@@ -74,9 +74,9 @@ public static class SparkplugPayloads
     });
 
     // Metrics come from the device's configuration. Timestamps are the measurement time,
-    // so replayed readings keep their original time.
+    // so replayed readings keep their original time. A birth also names each metric's permanent registry ID.
     public static Payload DeviceReading(ulong sequence, DeviceReading reading, bool historical = false,
-        bool includeDeviceSeq = true)
+        bool includeDeviceSeq = true, bool birth = false)
     {
         var timestamp = (ulong)reading.Timestamp.ToUnixTimeMilliseconds();
         var payload = new Payload { Timestamp = timestamp, Seq = sequence };
@@ -84,6 +84,12 @@ public static class SparkplugPayloads
         {
             metric.Timestamp = timestamp;
             if (historical) metric.IsHistorical = true;
+            if (birth && reading.MetricIds?.GetValueOrDefault(metric.Name) is { } id)
+            {
+                metric.Properties ??= new();
+                metric.Properties.Keys.Add(MetricIdentity.PropertyName);
+                metric.Properties.Values.Add(new Payload.Types.PropertyValue { Type = (uint)DataType.String, StringValue = id });
+            }
             payload.Metrics.Add(metric);
         }
         foreach (var (name, value) in reading.Metrics.OrderBy(metric => metric.Key, StringComparer.Ordinal))
