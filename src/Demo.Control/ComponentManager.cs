@@ -216,7 +216,9 @@ public sealed partial class ComponentManager : IDisposable
     private IEnumerable<string> Arguments(string name) => name switch
     {
         Configuration => [$"--Configuration:DatabasePath={Path.Combine(_state, "configuration.db")}"],
-        Historian => [],
+        // Device dashboards go where compose mounts them into Grafana; metric descriptions come from the registry.
+        Historian => [$"--Historian:DashboardDirectory={Path.Combine(_workspace, "grafana", "generated")}",
+            $"--Historian:ConfigUrl={ConfigurationUrl}"],
         // No backend in this flow: an empty HostId makes the gateway publish without waiting for a primary host.
         _ => [$"--Gateway:DatabasePath={Path.Combine(_state, "outbox.db")}", "--Sparkplug:HostId=",
             $"--Daq:StateDirectory={Path.Combine(_state, "daq")}", $"--Daq:ConfigUrl={ConfigurationUrl}"]

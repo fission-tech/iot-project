@@ -14,3 +14,4 @@ logs/
 *.db-shm
 *.db-journal
 .env
+grafana/generated/

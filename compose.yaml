@@ -58,6 +58,8 @@ services:
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/etc/grafana/dashboards:ro
+      # Per-device dashboards written by the historian.
+      - ./grafana/generated:/etc/grafana/generated:ro
       - grafana-data:/var/lib/grafana
     depends_on:
       timescaledb:
@@ -83,11 +85,15 @@ services:
       Mqtt__BrokerCertificatePath: /certs/broker.crt
       # The local broker certificate is issued for localhost; a real broker certificate names its own host.
       Mqtt__TlsServerName: localhost
+      # Metric descriptions (register area, data type, unit) for the generated device dashboards.
+      Historian__ConfigUrl: ${HISTORIAN_CONFIG_URL:-http://host.docker.internal:5300}
+      Historian__DashboardDirectory: /dashboards
     volumes:
       - type: bind
         source: ./broker/certs/broker.crt
         target: /certs/broker.crt
         read_only: true
+      - ./grafana/generated:/dashboards
     depends_on:
       timescaledb:
         condition: service_healthy
