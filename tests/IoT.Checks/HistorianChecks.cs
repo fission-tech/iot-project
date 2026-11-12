@@ -368,6 +368,10 @@ internal static class HistorianChecks
             "Rows must follow register areas in order, omit empty areas and keep removed metrics apart: " + string.Join(" | ", rows));
         System.Text.Json.Nodes.JsonNode Titled(string title, string type) =>
             panels.Single(panel => (string)panel["title"]! == title && (string)panel["type"]! == type);
+        var statusSteps = Titled("Online / offline", "state-timeline")["fieldConfig"]!["defaults"]!["thresholds"]!["steps"]!.AsArray();
+        Check((string)statusSteps[0]!["color"]! == "red" && statusSteps[0]!["value"] is null
+            && (string)statusSteps[1]!["color"]! == "green" && (int)statusSteps[1]!["value"]! == 1,
+            "Device status must explicitly color Offline=0 red and Online=1 green instead of Grafana's default thresholds.");
         var temperature = Titled("Temperature", "timeseries")["fieldConfig"]!["defaults"]!;
         Check((string)temperature["unit"]! == "celsius" && (int)temperature["decimals"]! == 1,
             "A scaled int16 in °C must chart in Celsius with one decimal.");

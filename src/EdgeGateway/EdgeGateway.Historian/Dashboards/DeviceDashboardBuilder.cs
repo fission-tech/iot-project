@@ -99,7 +99,8 @@ public static class DeviceDashboardBuilder
         {
             ["custom"] = new JsonObject { ["fillOpacity"] = 80, ["lineWidth"] = 0, ["spanNulls"] = true },
             ["mappings"] = Mapping(("1", "Online", "green"), ("0", "Offline", "red")),
-            ["color"] = new JsonObject { ["mode"] = "thresholds" }
+            ["color"] = new JsonObject { ["mode"] = "thresholds" },
+            ["thresholds"] = Thresholds("red", ("green", 1))
         });
         online["options"] = new JsonObject { ["showValue"] = "never", ["mergeValues"] = true, ["rowHeight"] = 0.8, ["legend"] = new JsonObject { ["showLegend"] = false } };
         layout.Add(online);
