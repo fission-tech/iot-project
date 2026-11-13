@@ -1,0 +1,941 @@
+[
+  {
+    "id": "tab_modbus_mqtt",
+    "type": "tab",
+    "label": "Modbus to MQTT",
+    "disabled": false,
+    "info": "Polls the devices in the Node-RED device registry over one Modbus TCP connection per host:port, stores each reading in a durable outbox and publishes it to iot/<device-id>/telemetry once the broker acknowledges it. Settings: this tab's environment variables (GATEWAY_*, BROKER_*, MQTT_* is the first-boot broker).",
+    "env": [
+      {
+        "name": "GATEWAY_ID",
+        "value": "nodered-gateway-01",
+        "type": "str"
+      },
+      {
+        "name": "BROKER_ID",
+        "value": "local",
+        "type": "str"
+      },
+      {
+        "name": "BROKER_TRIAL_SECONDS",
+        "value": "60",
+        "type": "str"
+      },
+      {
+        "name": "FAILED_POLLS_BEFORE_OFFLINE",
+        "value": "3",
+        "type": "str"
+      },
+      {
+        "name": "GATEWAY_DB",
+        "value": "D:\\Github\\iot-project\\nodered\\state\\gateway.db",
+        "type": "str"
+      },
+      {
+        "name": "GATEWAY_STATE_DIR",
+        "value": "D:\\Github\\iot-project\\nodered\\state",
+        "type": "str"
+      },
+      {
+        "name": "PUBLISH_BATCH_SIZE",
+        "value": "50",
+        "type": "str"
+      },
+      {
+        "name": "MQTT_HOST",
+        "value": "127.0.0.1",
+        "type": "str"
+      },
+      {
+        "name": "MQTT_PORT",
+        "value": "8883",
+        "type": "str"
+      },
+      {
+        "name": "MQTT_TLS",
+        "value": "true",
+        "type": "str"
+      },
+      {
+        "name": "MQTT_CA",
+        "value": "D:\\Github\\iot-project\\broker\\certs\\broker.crt",
+        "type": "str"
+      },
+      {
+        "name": "MQTT_KEEPALIVE_SECONDS",
+        "value": "60",
+        "type": "str"
+      },
+      {
+        "name": "MQTT_CONNECT_TIMEOUT_SECONDS",
+        "value": "10",
+        "type": "str"
+      },
+      {
+        "name": "MQTT_RETRY_DELAY_SECONDS",
+        "value": "2",
+        "type": "str"
+      },
+      {
+        "name": "MQTT_MAX_RETRY_DELAY_SECONDS",
+        "value": "30",
+        "type": "str"
+      }
+    ]
+  },
+  {
+    "id": "f937eaa01d565cc0",
+    "type": "tab",
+    "label": "Device Registry (Configuration layer)",
+    "disabled": false,
+    "info": "",
+    "env": [
+      {
+        "name": "REGISTRY_DB",
+        "value": "D:\\Github\\iot-project\\nodered\\registry.db",
+        "type": "str"
+      },
+      {
+        "name": "SEED_BROKER_HOST",
+        "value": "127.0.0.1",
+        "type": "str"
+      },
+      {
+        "name": "SEED_BROKER_CERTIFICATE",
+        "value": "D:\\Github\\iot-project\\broker\\certs\\broker.crt",
+        "type": "str"
+      }
+    ]
+  },
+  {
+    "id": "0047f745a441509a",
+    "type": "sqlitedb",
+    "db": "D:\\Github\\iot-project\\nodered\\registry.db",
+    "mode": "RWC"
+  },
+  {
+    "id": "0be0a7823f57785e",
+    "type": "global-config",
+    "env": [],
+    "modules": {
+      "node-red-node-sqlite": "2.0.1"
+    }
+  },
+  {
+    "id": "scale_and_format",
+    "type": "function",
+    "z": "tab_modbus_mqtt",
+    "name": "Decode and track device state",
+    "func": "function valuesOf(message) {\n    if (Array.isArray(message.values)) return message.values;\n    if (Array.isArray(message.payload?.data)) return message.payload.data;\n    if (Array.isArray(message.payload?.values)) return message.payload.values;\n    if (Array.isArray(message.payload)) return message.payload;\n    return null;\n}\n\nfunction decode(metric, frame, words) {\n    const offset = Number(metric.address) - frame.start;\n    const area = metric.register;\n    const type = metric.dataType || ((area === \"coil\" || area === \"discrete\") ? \"bool\" : \"int16\");\n    let raw;\n    if (area === \"coil\" || area === \"discrete\") {\n        raw = words[offset] ? 1 : 0;\n    } else if (type === \"int16\") {\n        const word = Number(words[offset]);\n        raw = word > 32767 ? word - 65536 : word;\n    } else if (type === \"uint16\") {\n        raw = Number(words[offset]);\n    } else {\n        const little = (metric.wordOrder || \"big\") === \"little\";\n        const first = Number(words[offset]);\n        const second = Number(words[offset + 1]);\n        const high = little ? second : first;\n        const low = little ? first : second;\n        const buffer = Buffer.alloc(4);\n        buffer.writeUInt16BE(high, 0);\n        buffer.writeUInt16BE(low, 2);\n        if (type === \"int32\") raw = buffer.readInt32BE(0);\n        else if (type === \"uint32\") raw = buffer.readUInt32BE(0);\n        else if (type === \"float32\") raw = buffer.readFloatBE(0);\n        else throw new Error(\"Unsupported data type \" + type);\n    }\n    const scaled = Math.round(raw * Number(metric.scale ?? 1) * 1e6) / 1e6;\n    if (!Number.isFinite(scaled)) throw new Error(\"decoded or scaled value is not finite\");\n    return { rawValue: raw, value: scaled, unit: metric.unit || \"\", quality: \"Good\" };\n}\n\nconst task = msg._iotTask;\nif (!task) return [null, null];\nconst frame = task.frame;\n// Names a frame and its metrics in errors, like the .NET gateway: \"holding 0+3 [Temperature, Flow]: reason\".\nconst frameError = (reason, names = frame.metrics.map(metric => metric.name).join(\", \")) =>\n    frame.register + \" \" + frame.start + \"+\" + frame.count + \" [\" + names + \"]: \" + reason;\n\nconst cycleKey = \"iotPollerSamples\";\nconst samples = flow.get(cycleKey) || {};\nconst sample = samples[task.cycleId];\nif (sample) {\n    const values = valuesOf(msg);\n    const failure = msg._iotError || msg.error?.message;\n    if (failure || !values) {\n        const reason = failure || \"Modbus response contained no register values\";\n        // A Modbus exception reply proves the device answered; a timeout or a lost connection does not.\n        if (msg._iotResponded) sample.responded = true;\n        for (const metric of frame.metrics) {\n            sample.metrics[metric.name] = { rawValue: null, value: null, unit: metric.unit || \"\", quality: \"Bad\", error: reason };\n        }\n        sample.frames.push({ register: frame.register, address: frame.start, count: frame.count, quality: \"Bad\", error: reason });\n        sample.errors.push(frameError(reason));\n    } else {\n        sample.responded = true;\n        sample.raw.push({ register: frame.register, start: frame.start, values: values.slice(0, frame.count).map(value => typeof value === \"boolean\" ? (value ? 1 : 0) : Number(value)) });\n        for (const metric of frame.metrics) {\n            try {\n                sample.metrics[metric.name] = decode(metric, frame, values);\n            } catch (error) {\n                sample.metrics[metric.name] = { rawValue: null, value: null, unit: metric.unit || \"\", quality: \"Bad\", error: error.message };\n                sample.errors.push(frameError(\"InvalidValue: \" + error.message + \". Quality = bad.\", metric.name));\n            }\n        }\n        sample.frames.push({ register: frame.register, address: frame.start, count: frame.count, quality: \"Good\" });\n    }\n    sample.remaining--;\n}\n\nlet output = null;\nif (sample && sample.remaining <= 0) {\n    delete samples[task.cycleId];\n    const device = task.device;\n    const failedPollsBeforeOffline = Math.max(1, Number(env.get(\"FAILED_POLLS_BEFORE_OFFLINE\")) || 3);\n    const statuses = global.get(\"iotDeviceStatus\") || {};\n    const definition = JSON.stringify(device);\n    let status = statuses[device.id];\n    if (!status || status.definition !== definition) {\n        status = { deviceId: device.id, definition, state: \"connecting\", endpoint: device.host + \":\" + device.port + \" unit \" + device.unitId,\n            frames: [], failures: 0, online: null, lastPollAt: null, lastSuccessAt: null, lastError: null, lastRaw: [], lastValues: {}, reported: [] };\n    }\n    const error = sample.errors.length ? sample.errors.join(\"; \") : null;\n    for (const reason of sample.errors.filter(reason => !status.reported.includes(reason))) node.warn(\"Device \" + device.id + \": \" + reason);\n    for (const [name, value] of Object.entries(sample.metrics)) {\n        if (value.quality === \"Good\" && status.lastValues[name] && status.lastValues[name].quality !== \"Good\")\n            node.log(device.id + \": \" + name + \" reading recovered. Quality = good.\");\n    }\n    status.reported = sample.errors;\n    // Only a poll the device did not answer at all counts towards offline; bad values in an answer do not.\n    status.failures = sample.responded ? 0 : status.failures + 1;\n    status.lastPollAt = sample.timestamp;\n    status.lastError = error;\n    const reading = state => ({ topic: \"iot/\" + device.id + \"/telemetry\", payload: {\n        deviceId: device.id, description: device.description || \"\", unitId: device.unitId,\n        timestamp: sample.timestamp, metrics: sample.metrics, frames: sample.frames, state } });\n    let publish = null;\n    if (sample.responded) {\n        if (status.online !== true) node.log(device.id + \" online.\");\n        status.online = true;\n        if (sample.raw.length) status.lastSuccessAt = sample.timestamp;\n        status.lastRaw = sample.raw;\n        status.lastValues = sample.metrics;\n        publish = \"reading\";\n    } else if (status.online === true && status.failures < failedPollsBeforeOffline) {\n        // Still counted online: the reading goes out with bad quality, so subscribers see the problem at once.\n        publish = \"reading\";\n    } else if (status.failures >= failedPollsBeforeOffline && status.online !== false) {\n        node.warn(device.id + \" offline after \" + status.failures + \" failed polls.\");\n        status.online = false;\n        output = { _kind: \"device-offline\", payload: { deviceId: device.id, reason: \"offline after \" + status.failures + \" failed polls: \" + error } };\n    }\n    // \"polling\" while answering cleanly, \"failing\" with errors but still online, \"offline\" after repeated failures.\n    status.state = sample.responded && !error ? \"polling\" : status.online === false ? \"offline\" : \"failing\";\n    if (publish) output = reading(status.state);\n    statuses[device.id] = status;\n    global.set(\"iotDeviceStatus\", statuses);\n}\nflow.set(cycleKey, samples);\nreturn [output, { _kind: \"done\", _iotTask: task }];",
+    "outputs": 2,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 150,
+    "y": 400,
+    "wires": [
+      [
+        "iot_gateway"
+      ],
+      [
+        "registry_scheduler"
+      ]
+    ]
+  },
+  {
+    "id": "modbus_errors",
+    "type": "debug",
+    "z": "tab_modbus_mqtt",
+    "name": "Published telemetry",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": true,
+    "complete": "true",
+    "targetType": "full",
+    "statusVal": "payload",
+    "statusType": "auto",
+    "x": 400,
+    "y": 180,
+    "wires": []
+  },
+  {
+    "id": "registry_config_inject",
+    "type": "inject",
+    "z": "tab_modbus_mqtt",
+    "name": "Refresh device registry",
+    "props": [
+      {
+        "p": "_kind",
+        "v": "config",
+        "vt": "str"
+      }
+    ],
+    "repeat": "10",
+    "crontab": "",
+    "once": true,
+    "onceDelay": 2,
+    "topic": "",
+    "payload": "",
+    "payloadType": "date",
+    "x": 150,
+    "y": 80,
+    "wires": [
+      [
+        "registry_query"
+      ]
+    ]
+  },
+  {
+    "id": "poll_tick",
+    "type": "inject",
+    "z": "tab_modbus_mqtt",
+    "name": "Poll due frames",
+    "props": [
+      {
+        "p": "_kind",
+        "v": "tick",
+        "vt": "str"
+      }
+    ],
+    "repeat": "1",
+    "crontab": "",
+    "once": true,
+    "onceDelay": 1,
+    "topic": "",
+    "payload": "",
+    "payloadType": "date",
+    "x": 850,
+    "y": 320,
+    "wires": [
+      [
+        "registry_scheduler"
+      ]
+    ]
+  },
+  {
+    "id": "registry_scheduler",
+    "type": "function",
+    "z": "tab_modbus_mqtt",
+    "name": "Schedule device polls",
+    "func": "const key = \"iotRegistryScheduler\";\n// A device whose poll never finished (lost message, redeploy) is polled again after this long.\nconst staleCycleMs = 60000;\nconst state = flow.get(key) || { version: null, devices: [], due: {}, cycles: {} };\nstate.cycles = state.cycles || {};\n// Fields from the single shared-client scheduler.\nfor (const old of [\"queue\", \"queuedDeviceIds\", \"busy\", \"activeTask\", \"seq\"]) delete state[old];\nconst reads = [];\nconst status = [];\n\nfunction areaWidth(metric) {\n    const type = metric.dataType || ((metric.register === \"coil\" || metric.register === \"discrete\") ? \"bool\" : \"int16\");\n    return [\"int32\", \"uint32\", \"float32\"].includes(type) ? 2 : 1;\n}\nfunction planFrames(metrics) {\n    const groups = {};\n    for (const metric of metrics || []) {\n        if (!groups[metric.register]) groups[metric.register] = [];\n        groups[metric.register].push({ ...metric, address: Number(metric.address), width: areaWidth(metric) });\n    }\n    const frames = [];\n    for (const [register, points] of Object.entries(groups)) {\n        points.sort((a, b) => a.address - b.address);\n        const limit = register === \"coil\" || register === \"discrete\" ? 2000 : 125;\n        let current = [], start = 0, end = 0;\n        for (const metric of points) {\n            const metricEnd = metric.address + metric.width - 1;\n            if (current.length && (metric.address > end + 9 || metricEnd - start + 1 > limit)) {\n                frames.push({ register, start, count: end - start + 1, metrics: current });\n                current = [];\n            }\n            if (!current.length) start = metric.address;\n            current.push(metric);\n            end = current.length === 1 ? metricEnd : Math.max(end, metricEnd);\n        }\n        if (current.length) frames.push({ register, start, count: end - start + 1, metrics: current });\n    }\n    return frames;\n}\n\nif (msg._kind === \"config\") {\n    const snapshot = msg.payload;\n    if (!snapshot || !Array.isArray(snapshot.devices) || !Number.isFinite(Number(snapshot.version))) {\n        status.push({ topic: \"iot/registry/status\", payload: { state: \"configuration-error\", error: \"Invalid registry snapshot\" } });\n    } else if (Number(snapshot.version) !== state.version) {\n        state.version = Number(snapshot.version);\n        state.devices = snapshot.devices.filter(device => device.enabled);\n        state.due = {};\n        flow.set(\"iotPollerSamples\", {});\n        // One status per enabled device. A changed definition starts over, like a new .NET poller; removed devices drop out.\n        const previous = global.get(\"iotDeviceStatus\") || {};\n        const statuses = {};\n        for (const device of state.devices) {\n            const definition = JSON.stringify(device);\n            let frames = [];\n            try { frames = planFrames(device.metrics).map(frame => frame.register + \" \" + frame.start + \"+\" + frame.count); } catch (error) { }\n            if (previous[device.id]?.definition === definition) {\n                statuses[device.id] = { ...previous[device.id], frames };\n                continue;\n            }\n            statuses[device.id] = { deviceId: device.id, definition, state: \"connecting\", endpoint: device.host + \":\" + device.port + \" unit \" + device.unitId,\n                frames, failures: 0, online: null, lastPollAt: null, lastSuccessAt: null, lastError: null, lastRaw: [], lastValues: {}, reported: [] };\n        }\n        global.set(\"iotDeviceStatus\", statuses);\n        status.push({ topic: \"iot/registry/status\", payload: { state: \"configuration-applied\", version: state.version, deviceCount: state.devices.length } });\n    }\n} else if (msg._kind === \"tick\") {\n    const now = Date.now();\n    for (const device of state.devices) {\n        const id = device.id;\n        const cycle = state.cycles[id];\n        if (cycle) {\n            if (now - cycle.startedAt < staleCycleMs) continue;\n            status.push({ topic: \"iot/\" + id + \"/status\", payload: { deviceId: id, state: \"poll-stalled\", error: \"Previous poll did not finish within \" + staleCycleMs / 1000 + \" s\" } });\n            delete state.cycles[id];\n        }\n        if (Number(state.due[id] || 0) > now) continue;\n        try {\n            const frames = planFrames(device.metrics);\n            if (!frames.length) throw new Error(\"Device has no metrics\");\n            const cycleId = id + \"-\" + now.toString(36) + \"-\" + Math.random().toString(36).slice(2);\n            const samples = flow.get(\"iotPollerSamples\") || {};\n            samples[cycleId] = { timestamp: new Date(now).toISOString(), metrics: {}, frames: [], raw: [], errors: [], responded: false, remaining: frames.length };\n            flow.set(\"iotPollerSamples\", samples);\n            frames.forEach((frame, index) => reads.push({ _iotTask: { cycleId, device, frame, lastFrame: index === frames.length - 1 } }));\n            state.cycles[id] = { cycleId, startedAt: now };\n            state.due[id] = now + Math.max(1, Number(device.pollIntervalSeconds) || 3) * 1000;\n        } catch (error) {\n            status.push({ topic: \"iot/\" + id + \"/status\", payload: { deviceId: id, state: \"configuration-error\", error: error.message } });\n            state.due[id] = now + 10000;\n        }\n    }\n} else if (msg._kind === \"done\") {\n    // Frames of one device share an endpoint queue, so the last frame finishes last.\n    const task = msg._iotTask;\n    if (task?.lastFrame && state.cycles[task.device.id]?.cycleId === task.cycleId) delete state.cycles[task.device.id];\n}\n\nflow.set(key, state);\nreturn [reads.length ? reads : null, status.length ? status : null];",
+    "outputs": 2,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "// Polls in flight before a restart or redeploy never report back. Device states start over, like new .NET pollers,\n// so the next configuration message is applied again even when its version is unchanged.\nconst state = flow.get(\"iotRegistryScheduler\");\nif (state) {\n    state.cycles = {};\n    state.version = null;\n    state.devices = []; // nothing is polled until the configuration is applied again\n    flow.set(\"iotRegistryScheduler\", state);\n}\nflow.set(\"iotPollerSamples\", {});\nglobal.set(\"iotDeviceStatus\", {});",
+    "finalize": "",
+    "libs": [],
+    "x": 1160,
+    "y": 400,
+    "wires": [
+      [
+        "registry_reader"
+      ],
+      [
+        "registry_status"
+      ]
+    ]
+  },
+  {
+    "id": "registry_status",
+    "type": "debug",
+    "z": "tab_modbus_mqtt",
+    "name": "Registry / poll status",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "x": 1100,
+    "y": 720,
+    "wires": []
+  },
+  {
+    "id": "registry_api_errors",
+    "type": "catch",
+    "z": "tab_modbus_mqtt",
+    "name": "Registry, reader and gateway errors",
+    "scope": [
+      "registry_load_db",
+      "registry_snapshot",
+      "registry_reader",
+      "iot_gateway"
+    ],
+    "uncaught": false,
+    "x": 570,
+    "y": 720,
+    "wires": [
+      [
+        "registry_status"
+      ]
+    ]
+  },
+  {
+    "id": "9ee3eb45ba8aeaa4",
+    "type": "inject",
+    "z": "f937eaa01d565cc0",
+    "name": "Initialize Registry",
+    "props": [
+      {
+        "p": "topic",
+        "vt": "str"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": true,
+    "onceDelay": "0.5",
+    "topic": "CREATE TABLE IF NOT EXISTS Devices (     Id TEXT NOT NULL PRIMARY KEY,     Data TEXT NOT NULL CHECK(json_valid(Data)) );",
+    "x": 190,
+    "y": 220,
+    "wires": [
+      [
+        "fe7fde9feb34f110"
+      ]
+    ]
+  },
+  {
+    "id": "fe7fde9feb34f110",
+    "type": "sqlite",
+    "z": "f937eaa01d565cc0",
+    "mydb": "0047f745a441509a",
+    "sqlquery": "msg.topic",
+    "sql": "",
+    "name": "Device Registry DB",
+    "x": 430,
+    "y": 220,
+    "wires": [
+      []
+    ]
+  },
+  {
+    "id": "870309d87cde7133",
+    "type": "http in",
+    "z": "f937eaa01d565cc0",
+    "name": "GET Devices",
+    "url": "/api/devices",
+    "method": "get",
+    "upload": false,
+    "skipBodyParsing": false,
+    "swaggerDoc": "",
+    "x": 150,
+    "y": 300,
+    "wires": [
+      [
+        "c22d6d9f13e4c097"
+      ]
+    ]
+  },
+  {
+    "id": "9ddd8ab23c4a91ef",
+    "type": "sqlite",
+    "z": "f937eaa01d565cc0",
+    "mydb": "0047f745a441509a",
+    "sqlquery": "msg.topic",
+    "sql": "",
+    "name": "Device Registry SQL",
+    "x": 730,
+    "y": 420,
+    "wires": [
+      [
+        "b223f6a3945bf349"
+      ]
+    ]
+  },
+  {
+    "id": "b223f6a3945bf349",
+    "type": "function",
+    "z": "f937eaa01d565cc0",
+    "name": "Format Response",
+    "func": "if (msg.error) {\n    const duplicate = /UNIQUE constraint|PRIMARY KEY/.test(msg.error.message || \"\");\n    msg.statusCode = duplicate ? 409 : 500;\n    msg.payload = { error: duplicate ? \"Device ID already exists.\" : \"Unable to access device registry.\" };\n} else if (msg.statusCode !== 400) {\n    const method = msg.req.method;\n    if (method === \"GET\") {\n        msg.statusCode = 200;\n        msg.payload = msg.payload.map(row => ({ ...JSON.parse(row.Data), deviceId: row.Id }));\n    } else if (method === \"POST\") {\n        msg.statusCode = 201;\n        msg.payload = { saved: true, device: msg.device };\n    } else if (!msg.payload.length) {\n        msg.statusCode = 404;\n        msg.payload = { error: \"Device not found.\" };\n    } else {\n        msg.statusCode = 200;\n        msg.payload = method === \"PUT\"\n            ? { updated: true, device: msg.device }\n            : { deleted: true, deviceId: msg.req.params.id };\n    }\n}\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 970,
+    "y": 420,
+    "wires": [
+      [
+        "cf1d264650662a1f",
+        "registry_changed"
+      ]
+    ]
+  },
+  {
+    "id": "81ab1e9426affe57",
+    "type": "http in",
+    "z": "f937eaa01d565cc0",
+    "name": "POST Device",
+    "url": "/api/devices",
+    "method": "post",
+    "upload": false,
+    "swaggerDoc": "",
+    "x": 150,
+    "y": 400,
+    "wires": [
+      [
+        "c22d6d9f13e4c097"
+      ]
+    ]
+  },
+  {
+    "id": "c22d6d9f13e4c097",
+    "type": "function",
+    "z": "f937eaa01d565cc0",
+    "name": "Validate + Prepare SQL",
+    "func": "function reject(message) {\n    msg.statusCode = 400;\n    msg.payload = { error: message };\n    return [null, msg];\n}\nconst method = msg.req.method;\nif (method === \"GET\") {\n    msg.topic = \"SELECT Id, Data FROM Devices ORDER BY Id;\";\n    msg.payload = [];\n    return [msg, null];\n}\nif (method === \"DELETE\") {\n    msg.topic = \"DELETE FROM Devices WHERE Id = $id RETURNING Id;\";\n    msg.payload = [msg.req.params.id];\n    return [msg, null];\n}\nconst d = msg.payload;\nif (msg.req.method === \"PUT\" && msg.req.params.id !== d?.deviceId)\n    return reject(\"Device ID must match the URL.\");\nif (!d || typeof d !== \"object\" || Array.isArray(d)) return reject(\"Provide a device JSON object.\");\nif (typeof d.deviceId !== \"string\" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(d.deviceId))\n    return reject(\"Provide a valid deviceId (1-64 letters, digits, dots, underscores or hyphens).\");\nif (typeof d.host !== \"string\" || !d.host.trim() || /[\\s/]/.test(d.host) ||\n    !Number.isInteger(d.port) || d.port < 1 || d.port > 65535 ||\n    !Number.isInteger(d.unitId) || d.unitId < 1 || d.unitId > 247 ||\n    !Number.isFinite(d.pollIntervalSeconds) || d.pollIntervalSeconds < 1 ||\n    (d.enabled !== undefined && typeof d.enabled !== \"boolean\"))\n    return reject(\"Provide host, port 1-65535, unitId 1-247 and pollIntervalSeconds >= 1. enabled must be boolean.\");\nif (!Array.isArray(d.metrics) || !d.metrics.length) return reject(\"Provide at least one metric.\");\nconst names = new Set();\nfor (const m of d.metrics) {\n    if (!m || typeof m.name !== \"string\" || !m.name.trim() || names.has(m.name) ||\n        ![\"holding\", \"input\", \"coil\", \"discrete\"].includes(m.register))\n        return reject(\"Metric names must be unique and register areas valid.\");\n    const bit = m.register === \"coil\" || m.register === \"discrete\";\n    const width = [\"int32\", \"uint32\", \"float32\"].includes(m.dataType) ? 2 : 1;\n    if ((bit ? m.dataType !== \"bool\" : ![\"int16\", \"uint16\", \"int32\", \"uint32\", \"float32\"].includes(m.dataType)) ||\n        !Number.isInteger(m.address) || m.address < 0 || m.address + width > 65536 ||\n        !Number.isFinite(m.scale ?? 1) || ![\"big\", \"little\"].includes(m.wordOrder ?? \"big\"))\n        return reject(\"Invalid address, data type, scale or word order for \" + m.name);\n    names.add(m.name);\n}\nmsg.device = { ...d, host: d.host.trim(), enabled: d.enabled ?? true };\nif (method === \"POST\") {\n    msg.topic = \"INSERT INTO Devices (Id, Data) VALUES ($id, $data);\";\n    msg.payload = [msg.device.deviceId, JSON.stringify(msg.device)];\n} else {\n    msg.topic = \"UPDATE Devices SET Data = $data WHERE Id = $id RETURNING Id;\";\n    msg.payload = [JSON.stringify(msg.device), msg.device.deviceId];\n}\nreturn [msg, null];",
+    "outputs": 2,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 440,
+    "y": 420,
+    "wires": [
+      [
+        "9ddd8ab23c4a91ef"
+      ],
+      [
+        "b223f6a3945bf349"
+      ]
+    ]
+  },
+  {
+    "id": "cf1d264650662a1f",
+    "type": "http response",
+    "z": "f937eaa01d565cc0",
+    "name": "Registry Response",
+    "statusCode": "",
+    "headers": {
+      "content-type": "application/json"
+    },
+    "x": 1210,
+    "y": 420,
+    "wires": []
+  },
+  {
+    "id": "47bc2a3f8c6f8432",
+    "type": "catch",
+    "z": "f937eaa01d565cc0",
+    "name": "Registry Errors",
+    "scope": [
+      "c22d6d9f13e4c097",
+      "9ddd8ab23c4a91ef"
+    ],
+    "uncaught": false,
+    "x": 740,
+    "y": 580,
+    "wires": [
+      [
+        "b223f6a3945bf349"
+      ]
+    ]
+  },
+  {
+    "id": "3a3514390e709e04",
+    "type": "http in",
+    "z": "f937eaa01d565cc0",
+    "name": "PUT Device",
+    "url": "/api/devices/:id",
+    "method": "put",
+    "upload": false,
+    "skipBodyParsing": false,
+    "swaggerDoc": "",
+    "x": 150,
+    "y": 500,
+    "wires": [
+      [
+        "c22d6d9f13e4c097"
+      ]
+    ]
+  },
+  {
+    "id": "24e8fab290090ef2",
+    "type": "http in",
+    "z": "f937eaa01d565cc0",
+    "name": "DELETE Device",
+    "url": "/api/devices/:id",
+    "method": "delete",
+    "upload": false,
+    "swaggerDoc": "",
+    "x": 150,
+    "y": 600,
+    "wires": [
+      [
+        "c22d6d9f13e4c097"
+      ]
+    ]
+  },
+  {
+    "id": "a3092461650e3436",
+    "type": "http in",
+    "z": "f937eaa01d565cc0",
+    "name": "Registry Page",
+    "url": "/register",
+    "method": "get",
+    "upload": false,
+    "swaggerDoc": "",
+    "x": 170,
+    "y": 800,
+    "wires": [
+      [
+        "a3a467eda8842b4e"
+      ]
+    ]
+  },
+  {
+    "id": "a3a467eda8842b4e",
+    "type": "template",
+    "z": "f937eaa01d565cc0",
+    "name": "Registry page HTML",
+    "field": "payload",
+    "fieldType": "msg",
+    "format": "handlebars",
+    "syntax": "mustache",
+    "template": "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>Device Registry</title>\n<style>\n*{box-sizing:border-box}body{margin:0;background:#f4f6f8;color:#1c2938;font:15px/1.5 system-ui,sans-serif}main{max-width:1240px;margin:36px auto;padding:0 24px}h1{margin:0;font-size:28px}h2{margin:0;font-size:20px}p{color:#596777;margin:6px 0 0}.bar{display:flex;align-items:center;justify-content:space-between;gap:16px}.actions{display:flex;gap:8px;flex-wrap:wrap}section{background:#fff;border:1px solid #dce2e8;border-radius:10px;padding:24px;margin-top:24px}button,input,select{font:inherit}button{padding:8px 13px;border:1px solid #c6cfd9;border-radius:6px;background:#fff;color:#253449;cursor:pointer}button:hover{background:#f0f4f9}button.primary{background:#235fd5;border-color:#235fd5;color:#fff}button.danger{color:#b42318}button:disabled{opacity:.55;cursor:wait}label{display:flex;flex-direction:column;gap:5px;font-size:13px;font-weight:600}input,select{width:100%;min-width:0;padding:9px 10px;border:1px solid #c6cfd9;border-radius:6px;color:#1c2938;background:#fff}input:read-only,select:disabled{background:#f4f6f8}input:focus,select:focus,button:focus-visible{outline:2px solid #8ab4ff;outline-offset:1px}.fields{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin:20px 0}.check{flex-direction:row;align-items:center;gap:9px}.check input{width:auto}.wide{grid-column:span 2}.scroll{overflow-x:auto}table{width:100%;border-collapse:collapse;margin-top:18px;text-align:left}th{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#647184}th,td{padding:12px 10px;border-bottom:1px solid #e7ecf1;vertical-align:middle}th:first-child,td:first-child{padding-left:0}td:last-child{white-space:nowrap}.badge{display:inline-block;padding:3px 9px;border-radius:20px;background:#e5f5ed;color:#176342;font-size:12px}.badge.off{background:#edf0f4;color:#596777}.metric-table{min-width:950px}.metric-table input,.metric-table select{padding:8px}.metric-table th:nth-child(1){width:19%}.metric-table th:nth-child(2){width:14%}.metric-table th:nth-child(3){width:12%}.metric-table th:nth-child(4){width:14%}.metric-table th:nth-child(5){width:12%}.metric-table th:nth-child(6){width:12%}.metric-table th:nth-child(7){width:12%}.footer{display:flex;justify-content:flex-end;gap:10px;margin-top:24px}#message{padding:12px 16px;border-radius:6px;background:#e8f3ec;color:#176342;margin-top:20px}#message.error{background:#fff0ed;color:#a52016}#empty{padding:24px 0 4px;color:#647184}.hint{font-size:13px}[hidden]{display:none!important}@media(max-width:760px){main{margin:22px auto;padding:0 14px}section{padding:16px}.fields{grid-template-columns:1fr 1fr}.wide{grid-column:span 2}.bar{align-items:flex-start;flex-wrap:wrap}.device-table{min-width:850px}}@media(max-width:440px){.fields{grid-template-columns:1fr}.wide{grid-column:span 1}}\n</style>\n</head>\n<body>\n<main>\n  <header class=\"bar\">\n    <div><h1>Device Registry</h1><p>Configure Modbus TCP devices and their metrics.</p></div>\n    <button class=\"primary\" id=\"add-device\" type=\"button\">Add device</button>\n  </header>\n  <div id=\"message\" role=\"status\" aria-live=\"polite\" hidden></div>\n  <section aria-labelledby=\"devices-heading\">\n    <div class=\"bar\"><h2 id=\"devices-heading\">Devices <span id=\"device-count\"></span></h2><button id=\"refresh\" type=\"button\">Refresh</button></div>\n    <div class=\"scroll\"><table class=\"device-table\" id=\"devices-table\" hidden>\n      <thead><tr><th>Device ID</th><th>Connection</th><th>Unit ID</th><th>Poll interval</th><th>Metrics</th><th>Status</th><th>Actions</th></tr></thead>\n      <tbody id=\"devices\"></tbody>\n    </table></div>\n    <div id=\"empty\">Loading devices...</div>\n  </section>\n  <section id=\"editor\" aria-labelledby=\"editor-heading\" hidden>\n    <h2 id=\"editor-heading\">Add device</h2>\n    <form id=\"device-form\">\n      <div class=\"fields\">\n        <label>Device ID<input id=\"device-id\" required maxlength=\"64\" pattern=\"[A-Za-z0-9][A-Za-z0-9._\\-]{0,63}\" placeholder=\"device-01\"></label>\n        <label>Host<input id=\"host\" required placeholder=\"127.0.0.1\"></label>\n        <label>TCP port<input id=\"port\" type=\"number\" min=\"1\" max=\"65535\" step=\"1\" required></label>\n        <label>Unit ID<input id=\"unit-id\" type=\"number\" min=\"1\" max=\"247\" step=\"1\" required></label>\n        <label>Poll interval (seconds)<input id=\"poll-interval\" type=\"number\" min=\"1\" step=\"any\" required></label>\n        <label class=\"check\"><input id=\"enabled\" type=\"checkbox\">Enabled</label>\n        <label class=\"wide\">Description (optional)<input id=\"description\"></label>\n      </div>\n      <div class=\"bar\"><h2>Metrics</h2><button id=\"add-metric\" type=\"button\">Add metric</button></div>\n      <p class=\"hint\">Addresses are 0-based. Holding register 40001 in ModSim is address 0 here. 32-bit values use two registers.</p>\n      <div class=\"scroll\"><table class=\"metric-table\">\n        <thead><tr><th>Metric name</th><th>Register area</th><th>Address</th><th>Data type</th><th>Word order</th><th>Scale</th><th>Unit</th><th></th></tr></thead>\n        <tbody id=\"metrics\"></tbody>\n      </table></div>\n      <div class=\"footer\"><button id=\"cancel\" type=\"button\">Cancel</button><button id=\"save\" type=\"submit\" class=\"primary\">Save device</button></div>\n    </form>\n  </section>\n  <section aria-labelledby=\"broker-heading\">\n    <style>.inline{flex-direction:row;align-items:center;gap:10px;margin-top:16px;font-weight:400}.inline select{width:auto;min-width:220px}#gateway-status{margin-top:10px}#gateway-status.warn{color:#a52016}#broker-form{margin-top:24px;border-top:1px solid #e7ecf1;padding-top:20px}.badge.bad{background:#fff0ed;color:#a52016}.badge.warn{background:#fff4e0;color:#8a5300}#devices tr.has-status td{border-bottom:0;padding-bottom:4px}tr.pstat td{padding-top:0;font-size:13px;color:#596777}.perr{color:#a52016}.praw{font-family:ui-monospace,Consolas,monospace;font-size:12px;overflow-wrap:anywhere}</style>\n    <div class=\"bar\"><h2 id=\"broker-heading\">MQTT broker</h2><button id=\"add-broker\" type=\"button\">Add broker</button></div>\n    <p id=\"gateway-status\" class=\"hint\" role=\"status\" aria-live=\"polite\">Loading gateway status...</p>\n    <label class=\"inline\">Gateway <strong id=\"gateway-id\">…</strong> uses broker <select id=\"gateway-broker\" aria-label=\"Broker this gateway uses\"></select></label>\n    <div class=\"scroll\"><table class=\"device-table\">\n      <thead><tr><th>Broker ID</th><th>Address</th><th>TLS certificate</th><th>Timing</th><th>Actions</th></tr></thead>\n      <tbody id=\"brokers\"></tbody>\n    </table></div>\n    <form id=\"broker-form\" hidden>\n      <h2 id=\"broker-editor-heading\">Add broker</h2>\n      <div class=\"fields\">\n        <label>Broker ID<input id=\"broker-id\" required placeholder=\"local\"></label>\n        <label>Host<input id=\"broker-host\" required placeholder=\"127.0.0.1\"></label>\n        <label>Port<input id=\"broker-port\" type=\"number\" min=\"1\" max=\"65535\" step=\"1\" required></label>\n        <label class=\"check\"><input id=\"broker-tls\" type=\"checkbox\">Use TLS</label>\n        <label class=\"wide\">Certificate: file path or https URL<input id=\"broker-cert\"></label>\n        <label class=\"wide\">Certificate SHA-256 fingerprint (required for a URL)<input id=\"broker-sha\" maxlength=\"95\"></label>\n        <label>Keep-alive (s)<input id=\"broker-keepalive\" type=\"number\" min=\"5\" max=\"3600\" step=\"1\" required></label>\n        <label>Connect timeout (s)<input id=\"broker-timeout\" type=\"number\" min=\"1\" max=\"300\" step=\"1\" required></label>\n        <label>Retry delay (s)<input id=\"broker-retry\" type=\"number\" min=\"1\" max=\"3600\" step=\"1\" required></label>\n        <label>Maximum retry delay (s)<input id=\"broker-max-retry\" type=\"number\" min=\"1\" max=\"3600\" step=\"1\" required></label>\n      </div>\n      <p class=\"hint\">Changes apply live. New settings get a trial; if they never connect, the gateway goes back to its last working broker.</p>\n      <div class=\"footer\"><button id=\"broker-cancel\" type=\"button\">Cancel</button><button type=\"submit\" class=\"primary\">Save broker</button></div>\n    </form>\n  </section>\n</main>\n<script>\nconst $ = id => document.getElementById(id);\nlet devices = [], editing = null, busy = false;\nfunction message(text, error = false) {\n    $('message').textContent = text;\n    $('message').className = error ? 'error' : '';\n    $('message').hidden = !text;\n}\nfunction setBusy(value) {\n    busy = value;\n    document.querySelectorAll('button').forEach(button => button.disabled = value);\n}\nasync function api(method, path = '', body) {\n    const response = await fetch('/api/devices' + path, {\n        method, headers: {'Content-Type':'application/json'},\n        body: body === undefined ? undefined : JSON.stringify(body)\n    });\n    const data = await response.json();\n    if (!response.ok) throw new Error(data.error || 'Request failed (' + response.status + ').');\n    return data;\n}\nfunction cell(row, text) {\n    const td = row.insertCell(); td.textContent = text; return td;\n}\nasync function loadDevices() {\n    devices = await api('GET');\n    $('devices').replaceChildren();\n    $('device-count').textContent = '(' + devices.length + ')';\n    $('devices-table').hidden = !devices.length;\n    $('empty').hidden = !!devices.length;\n    $('empty').textContent = 'No devices yet. Add a device to get started.';\n    for (const device of devices) {\n        const row = document.createElement('tr'); row.dataset.deviceId = device.deviceId;\n        cell(row, device.deviceId); cell(row, device.host + ':' + device.port);\n        cell(row, device.unitId); cell(row, device.pollIntervalSeconds + ' s'); cell(row, device.metrics.length);\n        const badge = document.createElement('span');\n        badge.className = device.enabled ? 'badge' : 'badge off';\n        badge.textContent = device.enabled ? 'Enabled' : 'Disabled';\n        cell(row, '').append(badge);\n        const actions = cell(row, ''); actions.className = 'actions';\n        for (const [action, label] of [['edit','Edit'],['toggle',device.enabled ? 'Disable' : 'Enable'],['delete','Delete']]) {\n            const button = document.createElement('button'); button.type = 'button'; button.textContent = label;\n            button.dataset.action = action; button.disabled = busy;\n            if (action === 'delete') button.className = 'danger';\n            button.onclick = () => deviceAction(action, device);\n            actions.append(button);\n        }\n        $('devices').append(row);\n    }\n    renderDeviceStatuses();\n}\nfunction addMetric(metric = {}) {\n    const row = document.createElement('tr'); row.metric = {...metric};\n    row.innerHTML = '<td><input data-field=\"name\" aria-label=\"Metric name\" required></td>' +\n        '<td><select data-field=\"register\" aria-label=\"Register area\"><option value=\"holding\">Holding</option><option value=\"input\">Input</option><option value=\"coil\">Coil</option><option value=\"discrete\">Discrete</option></select></td>' +\n        '<td><input data-field=\"address\" aria-label=\"Address\" type=\"number\" min=\"0\" step=\"1\" required></td>' +\n        '<td><select data-field=\"dataType\" aria-label=\"Data type\"></select></td>' +\n        '<td><select data-field=\"wordOrder\" aria-label=\"Word order\"><option value=\"big\">Big</option><option value=\"little\">Little</option></select></td>' +\n        '<td><input data-field=\"scale\" aria-label=\"Scale\" type=\"number\" step=\"any\" required></td>' +\n        '<td><input data-field=\"unit\" aria-label=\"Unit\"></td>' +\n        '<td><button type=\"button\" class=\"danger\" aria-label=\"Remove metric\">Remove</button></td>';\n    const input = name => row.querySelector('[data-field=\"'+name+'\"]');\n    input('name').value = metric.name ?? '';\n    input('register').value = metric.register ?? 'holding';\n    input('address').value = metric.address ?? '';\n    input('scale').value = metric.scale ?? 1;\n    input('unit').value = metric.unit ?? '';\n    input('wordOrder').value = metric.wordOrder ?? 'big';\n    function updateWidth() {\n        const wide = ['int32','uint32','float32'].includes(input('dataType').value);\n        input('wordOrder').disabled = !wide;\n        input('address').max = wide ? '65534' : '65535';\n    }\n    function updateTypes(preferred) {\n        const bit = ['coil','discrete'].includes(input('register').value);\n        const types = bit ? ['bool'] : ['int16','uint16','int32','uint32','float32'];\n        const selected = preferred ?? input('dataType').value;\n        input('dataType').replaceChildren(...types.map(type => new Option(type, type)));\n        if (types.includes(selected)) input('dataType').value = selected;\n        updateWidth();\n    }\n    input('register').onchange = () => updateTypes();\n    input('dataType').onchange = updateWidth;\n    row.querySelector('button').onclick = () => {\n        if ($('metrics').children.length === 1) return message('Keep at least one metric.', true);\n        row.remove();\n    };\n    updateTypes(metric.dataType);\n    $('metrics').append(row);\n}\nfunction openEditor(device = null) {\n    editing = device;\n    $('editor-heading').textContent = device ? 'Edit ' + device.deviceId : 'Add device';\n    $('device-id').value = device?.deviceId ?? '';\n    $('device-id').readOnly = !!device;\n    $('host').value = device?.host ?? '127.0.0.1';\n    $('port').value = device?.port ?? 502;\n    $('unit-id').value = device?.unitId ?? 1;\n    $('poll-interval').value = device?.pollIntervalSeconds ?? 3;\n    $('enabled').checked = device?.enabled ?? true;\n    $('description').value = device?.description ?? '';\n    $('metrics').replaceChildren();\n    (device?.metrics ?? [{name:'Temperature',register:'holding',address:0,dataType:'int16',scale:0.1,unit:'°C'}]).forEach(addMetric);\n    $('editor').hidden = false;\n    message('');\n    $('editor').scrollIntoView({behavior:'smooth',block:'start'});\n    (device ? $('host') : $('device-id')).focus();\n}\nasync function deviceAction(action, device) {\n    if (busy) return;\n    if (action === 'edit') return openEditor(device);\n    if (action === 'delete' && !confirm('Delete ' + device.deviceId + ' from the registry?')) return;\n    setBusy(true);\n    try {\n        const path = '/' + encodeURIComponent(device.deviceId);\n        if (action === 'delete') await api('DELETE', path);\n        else await api('PUT', path, {...device, enabled:!device.enabled});\n        if (editing?.deviceId === device.deviceId) { $('editor').hidden = true; editing = null; }\n        message(action === 'delete' ? 'Device deleted.' : (device.enabled ? 'Device disabled.' : 'Device enabled.'));\n        await loadDevices();\n    } catch (error) { message(error.message, true); }\n    finally { setBusy(false); }\n}\n$('device-form').onsubmit = async event => {\n    event.preventDefault();\n    if (busy) return;\n    const metrics = Array.from($('metrics').children, row => {\n        const value = field => row.querySelector('[data-field=\"'+field+'\"]').value;\n        return {...row.metric, name:value('name').trim(), register:value('register'), address:Number(value('address')),\n            dataType:value('dataType'), wordOrder:['int32','uint32','float32'].includes(value('dataType')) ? value('wordOrder') : null,\n            scale:Number(value('scale')), unit:value('unit')};\n    });\n    const device = {...editing, deviceId:$('device-id').value.trim(), host:$('host').value.trim(),\n        port:$('port').valueAsNumber, unitId:$('unit-id').valueAsNumber,\n        pollIntervalSeconds:$('poll-interval').valueAsNumber, enabled:$('enabled').checked,\n        description:$('description').value, metrics};\n    setBusy(true);\n    try {\n        await api(editing ? 'PUT' : 'POST', editing ? '/' + encodeURIComponent(editing.deviceId) : '', device);\n        $('editor').hidden = true; editing = null;\n        message('Device saved.');\n        await loadDevices();\n    } catch (error) { message(error.message, true); }\n    finally { setBusy(false); }\n};\n$('add-device').onclick = () => openEditor();\n$('add-metric').onclick = () => addMetric();\n$('cancel').onclick = () => { $('editor').hidden = true; editing = null; message(''); };\n$('refresh').onclick = async () => {\n    setBusy(true);\n    try { await loadDevices(); message(''); }\n    catch (error) { message(error.message, true); }\n    finally { setBusy(false); }\n};\nloadDevices().catch(error => { $('empty').textContent = 'Unable to load devices. Use Refresh to try again.'; message(error.message, true); });\n// ---- MQTT broker settings and gateway status ----\nlet brokerList = [], editingBroker = null, gatewayStatus = null;\nasync function request(method, path, body) {\n    const response = await fetch('/api' + path, {\n        method, headers: {'Content-Type':'application/json'},\n        body: body === undefined ? undefined : JSON.stringify(body)\n    });\n    const text = await response.text();\n    const data = text ? JSON.parse(text) : null;\n    if (!response.ok) throw new Error((data && data.error) || 'Request failed (' + response.status + ').');\n    return data;\n}\nconst brokerName = b => b ? b.id + ' ' + b.host + ':' + b.port + (b.useTls ? ' TLS' : '') : 'none';\nfunction showGatewayStatus() {\n    const s = gatewayStatus, line = $('gateway-status');\n    if (!s || !s.gatewayId) { line.textContent = 'Gateway not running.'; line.className = 'hint warn'; return; }\n    $('gateway-id').textContent = s.gatewayId;\n    const parts = [];\n    const state = s.connection.state;\n    if (state === 'online') parts.push('Online on ' + brokerName(s.broker.active) + ' (' + s.broker.source + ' settings)');\n    else if (state === 'retry-waiting') parts.push('Offline, retrying ' + brokerName(s.connection.broker) + ' in ' + s.connection.retryInSeconds + ' s');\n    else parts.push(state.charAt(0).toUpperCase() + state.slice(1) + (s.connection.broker ? ' to ' + brokerName(s.connection.broker) : ''));\n    parts.push(s.buffered + ' message(s) buffered');\n    if (s.broker.trying) parts.push('trying ' + brokerName(s.broker.trying) + ' since ' + new Date(s.broker.tryingSince).toLocaleTimeString());\n    if (s.broker.rejected) parts.push('rejected ' + brokerName(s.broker.rejected) + ': ' + s.broker.rejectedReason);\n    if (s.broker.certificateExpires) {\n        const days = Math.floor((Date.parse(s.broker.certificateExpires) - Date.now()) / 86400000);\n        parts.push('certificate expires ' + new Date(s.broker.certificateExpires).toLocaleDateString() + (days < 30 ? ' (in ' + days + ' days)' : ''));\n    }\n    if (state !== 'online' && s.lastError) parts.push('last error: ' + s.lastError);\n    line.textContent = parts.join(' · ');\n    line.className = state === 'online' && !s.broker.rejected ? 'hint' : 'hint warn';\n}\n// What the gateway is doing with each device right now: state, last reading, error, frames, raw registers.\nconst STATE_BADGE = {polling:'badge', failing:'badge bad', offline:'badge warn', connecting:'badge off'};\nconst ago = iso => iso ? Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000)) + ' s ago' : 'never';\nfunction renderDeviceStatuses() {\n    const statuses = (gatewayStatus && gatewayStatus.devices) || [];\n    for (const row of document.querySelectorAll('#devices tr[data-device-id]')) {\n        const device = devices.find(d => d.deviceId === row.dataset.deviceId);\n        const s = statuses.find(item => item.deviceId === row.dataset.deviceId);\n        const badge = row.querySelector('.badge');\n        let detail = row.nextElementSibling;\n        if (!detail || !detail.classList.contains('pstat')) {\n            detail = document.createElement('tr'); detail.className = 'pstat';\n            detail.insertCell().colSpan = 7;\n            row.after(detail); row.classList.add('has-status');\n        }\n        const td = detail.cells[0];\n        td.replaceChildren();\n        const add = (text, className) => { const div = document.createElement('div'); div.textContent = text; if (className) div.className = className; td.append(div); };\n        if (!device || !device.enabled) { badge.className = 'badge off'; badge.textContent = 'Disabled'; add('Not polled (disabled).'); continue; }\n        if (!s) {\n            badge.className = 'badge off'; badge.textContent = 'Waiting';\n            add(gatewayStatus && gatewayStatus.gatewayId ? 'Waiting for the gateway to load this device (up to 10 s).' : 'Gateway not running.');\n            continue;\n        }\n        badge.className = STATE_BADGE[s.state] || 'badge off';\n        badge.textContent = s.state;\n        add(s.endpoint + ' · last reading #' + (s.lastSeq || '—') + ' · polled ' + ago(s.lastPollAt) + ' · last good ' + ago(s.lastSuccessAt) +\n            (s.failures ? ' · ' + s.failures + ' failed poll(s) in a row' : ''));\n        if (s.lastError) add(s.lastError, 'perr');\n        const raw = s.lastRaw.map(f => f.register + ' ' + f.start + '..' + (f.start + f.values.length - 1) + ': ' + f.values.join(' ')).join(' · ');\n        add('frames: ' + s.frames.join(', ') + (raw ? ' · raw: ' + raw : ''), 'praw');\n    }\n}\nasync function refreshGatewayStatus() {\n    try { gatewayStatus = await request('GET', '/gateway/status'); }\n    catch (error) { gatewayStatus = null; }\n    showGatewayStatus();\n    renderDeviceStatuses();\n}\nasync function loadBrokers() {\n    const [brokers, assignments] = await Promise.all([request('GET', '/brokers'), request('GET', '/gateways')]);\n    brokerList = brokers;\n    await refreshGatewayStatus();\n    const gatewayId = gatewayStatus && gatewayStatus.gatewayId;\n    const assigned = assignments.find(a => a.gatewayId === gatewayId);\n    const select = $('gateway-broker');\n    const own = new Option('its own setting (' + ((gatewayStatus && gatewayStatus.defaultBrokerId) || 'BROKER_ID') + ')', '');\n    select.replaceChildren(own, ...brokers.map(b => new Option(brokerName(b), b.id)));\n    select.value = assigned ? assigned.brokerId : '';\n    select.disabled = !gatewayId;\n    $('brokers').replaceChildren();\n    for (const broker of brokers) {\n        const row = document.createElement('tr');\n        cell(row, broker.id);\n        cell(row, broker.host + ':' + broker.port);\n        cell(row, broker.useTls ? (broker.certificateLocation + (broker.certificateSha256 ? ' (pinned)' : '')) : 'no TLS');\n        cell(row, 'keep-alive ' + broker.keepAliveSeconds + ' s, timeout ' + broker.connectTimeoutSeconds + ' s, retry ' + broker.retryDelaySeconds + '–' + broker.maxRetryDelaySeconds + ' s');\n        const actions = cell(row, ''); actions.className = 'actions';\n        for (const [action, label] of [['edit','Edit'],['delete','Delete']]) {\n            const button = document.createElement('button'); button.type = 'button'; button.textContent = label;\n            if (action === 'delete') button.className = 'danger';\n            button.onclick = () => brokerAction(action, broker);\n            actions.append(button);\n        }\n        $('brokers').append(row);\n    }\n}\nfunction openBrokerEditor(broker = null) {\n    editingBroker = broker;\n    $('broker-editor-heading').textContent = broker ? 'Edit broker ' + broker.id : 'Add broker';\n    $('broker-id').value = broker ? broker.id : '';\n    $('broker-id').readOnly = !!broker;\n    $('broker-host').value = broker ? broker.host : '127.0.0.1';\n    $('broker-port').value = broker ? broker.port : 8883;\n    $('broker-tls').checked = broker ? broker.useTls : true;\n    $('broker-cert').value = broker && broker.certificateLocation || '';\n    $('broker-sha').value = broker && broker.certificateSha256 || '';\n    $('broker-keepalive').value = broker ? broker.keepAliveSeconds : 60;\n    $('broker-timeout').value = broker ? broker.connectTimeoutSeconds : 10;\n    $('broker-retry').value = broker ? broker.retryDelaySeconds : 2;\n    $('broker-max-retry').value = broker ? broker.maxRetryDelaySeconds : 30;\n    $('broker-form').hidden = false;\n    message('');\n    $('broker-form').scrollIntoView({behavior:'smooth',block:'start'});\n}\nasync function brokerAction(action, broker) {\n    if (busy) return;\n    if (action === 'edit') return openBrokerEditor(broker);\n    if (!confirm('Delete broker ' + broker.id + '?')) return;\n    setBusy(true);\n    try { await request('DELETE', '/brokers/' + encodeURIComponent(broker.id)); message('Broker deleted.'); await loadBrokers(); }\n    catch (error) { message(error.message, true); }\n    finally { setBusy(false); }\n}\n$('broker-form').onsubmit = async event => {\n    event.preventDefault();\n    if (busy) return;\n    const tls = $('broker-tls').checked;\n    const broker = {\n        id: $('broker-id').value.trim(), host: $('broker-host').value.trim(), port: $('broker-port').valueAsNumber, useTls: tls,\n        certificateLocation: tls && $('broker-cert').value.trim() ? $('broker-cert').value.trim() : null,\n        certificateSha256: tls && $('broker-sha').value.trim() ? $('broker-sha').value.replace(/[:\\s]/g, '') : null,\n        keepAliveSeconds: $('broker-keepalive').valueAsNumber, connectTimeoutSeconds: $('broker-timeout').valueAsNumber,\n        retryDelaySeconds: $('broker-retry').valueAsNumber, maxRetryDelaySeconds: $('broker-max-retry').valueAsNumber\n    };\n    setBusy(true);\n    try {\n        await request(editingBroker ? 'PUT' : 'POST', editingBroker ? '/brokers/' + encodeURIComponent(editingBroker.id) : '/brokers', broker);\n        $('broker-form').hidden = true; editingBroker = null;\n        message('Broker saved. The gateway applies it within a few seconds.');\n        await loadBrokers();\n    } catch (error) { message(error.message, true); }\n    finally { setBusy(false); }\n};\n$('gateway-broker').onchange = async () => {\n    const gatewayId = gatewayStatus && gatewayStatus.gatewayId;\n    const brokerId = $('gateway-broker').value;\n    setBusy(true);\n    try {\n        if (brokerId) await request('PUT', '/gateways/' + encodeURIComponent(gatewayId), {gatewayId, brokerId});\n        else await request('DELETE', '/gateways/' + encodeURIComponent(gatewayId)).catch(() => null);\n        message('Gateway broker changed. It switches within a few seconds.');\n        await loadBrokers();\n    } catch (error) { message(error.message, true); await loadBrokers(); }\n    finally { setBusy(false); }\n};\n$('add-broker').onclick = () => openBrokerEditor();\n$('broker-cancel').onclick = () => { $('broker-form').hidden = true; editingBroker = null; message(''); };\nloadBrokers().catch(error => message(error.message, true));\nsetInterval(refreshGatewayStatus, 3000);\n</script>\n</body>\n</html>\n",
+    "output": "str",
+    "x": 450,
+    "y": 800,
+    "wires": [
+      [
+        "41a5e963b51bc24a"
+      ]
+    ]
+  },
+  {
+    "id": "41a5e963b51bc24a",
+    "type": "http response",
+    "z": "f937eaa01d565cc0",
+    "name": "Return Page",
+    "statusCode": "200",
+    "headers": {
+      "content-type": "text/html; charset=utf-8"
+    },
+    "x": 730,
+    "y": 800,
+    "wires": []
+  },
+  {
+    "id": "registry_changed",
+    "type": "function",
+    "z": "f937eaa01d565cc0",
+    "name": "Registry changed?",
+    "func": "const method = msg.req?.method;\nif (msg.statusCode >= 200 && msg.statusCode < 300 && method !== \"GET\") return { _kind: \"reload\" };\nreturn null;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 1070,
+    "y": 780,
+    "wires": [
+      [
+        "registry_changed_out"
+      ]
+    ]
+  },
+  {
+    "id": "registry_changed_out",
+    "type": "link out",
+    "z": "f937eaa01d565cc0",
+    "name": "Registry changed",
+    "mode": "link",
+    "links": [
+      "registry_changed_in"
+    ],
+    "x": 1265,
+    "y": 780,
+    "wires": []
+  },
+  {
+    "id": "registry_changed_in",
+    "type": "link in",
+    "z": "tab_modbus_mqtt",
+    "name": "Registry changed",
+    "links": [
+      "registry_changed_out"
+    ],
+    "x": 105,
+    "y": 240,
+    "wires": [
+      [
+        "registry_query"
+      ]
+    ]
+  },
+  {
+    "id": "registry_query",
+    "type": "function",
+    "z": "tab_modbus_mqtt",
+    "name": "Query registry",
+    "func": "// Devices, broker settings and this gateway's broker assignment in one consistent read.\nmsg.topic = `SELECT 'device' AS Kind, Id, Data FROM Devices\nUNION ALL\nSELECT 'broker', Id, json_object('id', Id, 'host', Host, 'port', Port, 'useTls', json(CASE WHEN UseTls THEN 'true' ELSE 'false' END),\n    'certificateLocation', CertificateLocation, 'certificateSha256', CertificateSha256,\n    'keepAliveSeconds', KeepAliveSeconds, 'connectTimeoutSeconds', ConnectTimeoutSeconds,\n    'retryDelaySeconds', RetryDelaySeconds, 'maxRetryDelaySeconds', MaxRetryDelaySeconds) FROM Brokers\nUNION ALL\nSELECT 'assignment', GatewayId, BrokerId FROM GatewayBrokers;`;\nmsg.payload = [];\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 420,
+    "y": 80,
+    "wires": [
+      [
+        "registry_load_db"
+      ]
+    ]
+  },
+  {
+    "id": "registry_load_db",
+    "type": "sqlite",
+    "z": "tab_modbus_mqtt",
+    "mydb": "0047f745a441509a",
+    "sqlquery": "msg.topic",
+    "sql": "",
+    "name": "Device Registry DB",
+    "x": 670,
+    "y": 80,
+    "wires": [
+      [
+        "registry_snapshot"
+      ]
+    ]
+  },
+  {
+    "id": "registry_snapshot",
+    "type": "function",
+    "z": "tab_modbus_mqtt",
+    "name": "Build registry snapshot",
+    "func": "function hash(text) {\n    let h = 2166136261;\n    for (let i = 0; i < text.length; i++) {\n        h ^= text.charCodeAt(i);\n        h = Math.imul(h, 16777619);\n    }\n    return h >>> 0;\n}\n\nconst devices = [];\nconst brokers = {};\nconst assignments = {};\nfor (const row of msg.payload || []) {\n    const kind = row.Kind || \"device\";\n    try {\n        if (kind === \"device\") devices.push({ ...JSON.parse(row.Data), id: row.Id });\n        else if (kind === \"broker\") brokers[row.Id] = JSON.parse(row.Data);\n        else if (kind === \"assignment\") assignments[row.Id] = row.Data;\n    } catch (error) {\n        node.warn(\"Skipping registry row \" + row.Id + \": \" + error.message);\n    }\n}\n// This gateway's assigned broker, else the one its BROKER_ID names. Null leaves the gateway on its last working settings.\nconst brokerId = assignments[env.get(\"GATEWAY_ID\")] ?? env.get(\"BROKER_ID\");\nconst broker = brokers[brokerId] ?? null;\nreturn { _kind: \"config\", payload: { version: hash(JSON.stringify({ devices, broker })), devices, broker } };",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 920,
+    "y": 80,
+    "wires": [
+      [
+        "registry_scheduler",
+        "iot_gateway"
+      ]
+    ]
+  },
+  {
+    "id": "registry_reader",
+    "type": "function",
+    "z": "tab_modbus_mqtt",
+    "name": "Read frame (one connection per endpoint)",
+    "func": "const task = msg._iotTask;\nif (!task) return null;\nconst connectTimeoutMs = 3000;\nconst requestTimeoutMs = 2000;\nconst idleCloseMs = 5 * 60 * 1000;\nconst readers = { holding: \"readHoldingRegisters\", input: \"readInputRegisters\", coil: \"readCoils\", discrete: \"readDiscreteInputs\" };\nconst pool = context.get(\"pool\");\n\nfunction drop(endpoint) {\n    const client = endpoint.client;\n    endpoint.client = null;\n    if (client) {\n        try { client.close(() => {}); } catch (error) { }\n    }\n}\nasync function connect(endpoint) {\n    if (endpoint.client?.isOpen) return endpoint.client;\n    drop(endpoint);\n    const client = new ModbusRTU();\n    // An unhandled \"error\" event would crash Node-RED; failures reach us through the request promises.\n    client.on(\"error\", () => {});\n    client.on(\"close\", () => { if (endpoint.client === client) endpoint.client = null; });\n    let timer;\n    try {\n        await Promise.race([\n            client.connectTCP(endpoint.host, { port: endpoint.port }),\n            new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(\"connection timed out\")), connectTimeoutMs); })\n        ]);\n    } catch (error) {\n        try { client.close(() => {}); } catch (closeError) { }\n        throw error;\n    } finally {\n        clearTimeout(timer);\n    }\n    client.setTimeout(requestTimeoutMs);\n    endpoint.client = client;\n    return client;\n}\nasync function readFrame(endpoint) {\n    // Like the .NET gateway, no further requests of this poll go out once the device failed to answer one.\n    if (endpoint.abandonedCycle === task.cycleId) throw new Error(\"not attempted after an earlier frame of this poll failed\");\n    const method = readers[task.frame.register];\n    if (!method) throw new Error(\"unknown Modbus area \" + task.frame.register);\n    const client = await connect(endpoint);\n    client.setID(Number(task.device.unitId));\n    try {\n        const result = await client[method](task.frame.start, task.frame.count);\n        return result.data;\n    } catch (error) {\n        // An exception or timeout comes from one unit; the connection still serves the others.\n        if (error.modbusCode === undefined && error.name !== \"TransactionTimedOutError\") drop(endpoint);\n        throw error;\n    }\n}\nfunction closeIdle() {\n    const now = Date.now();\n    for (const [key, endpoint] of pool) {\n        if (endpoint.pending === 0 && now - endpoint.lastUsed > idleCloseMs) {\n            drop(endpoint);\n            pool.delete(key);\n        }\n    }\n}\nfunction showStatus() {\n    const endpoints = [...pool.values()];\n    const open = endpoints.filter(endpoint => endpoint.client?.isOpen).length;\n    node.status({ fill: open === endpoints.length ? \"green\" : open ? \"yellow\" : \"red\", shape: \"dot\", text: open + \"/\" + endpoints.length + \" endpoints connected\" });\n}\n\nconst key = task.device.host + \":\" + task.device.port;\nlet endpoint = pool.get(key);\nif (!endpoint) {\n    endpoint = { key, host: task.device.host, port: Number(task.device.port), client: null, chain: Promise.resolve(), pending: 0, lastUsed: Date.now() };\n    pool.set(key, endpoint);\n}\n// One request at a time per endpoint; different endpoints run in parallel.\nendpoint.pending++;\nendpoint.chain = endpoint.chain\n    .then(() => readFrame(endpoint))\n    .then(data => { msg.payload = { data }; }, error => {\n        // Exception codes the device itself returns prove it answered; gateway codes 10/11, timeouts and connection errors do not.\n        msg._iotResponded = [1, 2, 3, 4, 5, 6, 8].includes(error.modbusCode);\n        if (!msg._iotResponded) endpoint.abandonedCycle = task.cycleId;\n        msg._iotError = key + \" unit \" + task.device.unitId + \": \" + (error.message || String(error));\n    })\n    .then(() => {\n        endpoint.pending--;\n        endpoint.lastUsed = Date.now();\n        node.send(msg);\n        closeIdle();\n        showStatus();\n    });\nreturn null;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "context.set(\"pool\", new Map());",
+    "finalize": "for (const endpoint of (context.get(\"pool\") || new Map()).values()) {\n    try { endpoint.client?.close(() => {}); } catch (error) { }\n}",
+    "libs": [
+      {
+        "var": "ModbusRTU",
+        "module": "modbus-serial"
+      }
+    ],
+    "x": 640,
+    "y": 580,
+    "wires": [
+      [
+        "scale_and_format"
+      ]
+    ]
+  },
+  {
+    "id": "iot_gateway",
+    "type": "function",
+    "z": "tab_modbus_mqtt",
+    "name": "MQTT gateway (outbox, broker connection)",
+    "func": "const gateway = context.get(\"gateway\");\nif (!gateway) return null;\nif (msg._kind === \"config\") {\n    gateway.offer(msg.payload?.broker ?? null);\n    if (Array.isArray(msg.payload?.devices)) gateway.applyDevices(msg.payload.devices);\n} else if (msg._kind === \"device-offline\") {\n    gateway.offline(msg.payload.deviceId, msg.payload.reason);\n} else if (msg.payload?.deviceId) {\n    gateway.accept(msg.payload);\n}\nreturn null;",
+    "outputs": 2,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "// Broker settings rules, the same as the .NET BrokerProfile.Validate(). Returns a problem, or null when valid.\nconst brokerFields = [\"id\", \"host\", \"port\", \"useTls\", \"certificateLocation\", \"certificateSha256\",\n    \"keepAliveSeconds\", \"connectTimeoutSeconds\", \"retryDelaySeconds\", \"maxRetryDelaySeconds\"];\nfunction validId(value) {\n    return typeof value === \"string\" && value.trim() !== \"\" && !/[\\s\\/+#]/.test(value);\n}\nfunction brokerProblem(broker) {\n    if (!broker || typeof broker !== \"object\" || Array.isArray(broker)) return \"Provide a broker JSON object.\";\n    const unknown = Object.keys(broker).filter(key => !brokerFields.includes(key));\n    if (unknown.length) return \"Unknown broker field(s): \" + unknown.join(\", \") + \".\";\n    const whole = (value, min, max) => Number.isInteger(value) && value >= min && value <= max;\n    if (!validId(broker.id)) return \"Broker ID must be nonempty and must not contain /, +, # or whitespace.\";\n    if (typeof broker.host !== \"string\" || broker.host.trim() === \"\" || /\\s/.test(broker.host)) return \"Broker host is required and must not contain spaces.\";\n    if (!whole(broker.port, 1, 65535)) return \"Broker port must be between 1 and 65535.\";\n    if (typeof broker.useTls !== \"boolean\") return \"useTls must be true or false.\";\n    // Keep-alive also bounds how long a silently dead broker goes unnoticed while idle.\n    if (!whole(broker.keepAliveSeconds, 5, 3600)) return \"Keep-alive must be 5–3600 seconds.\";\n    if (!whole(broker.connectTimeoutSeconds, 1, 300)) return \"Connect timeout must be 1–300 seconds.\";\n    if (!whole(broker.retryDelaySeconds, 1, 3600)) return \"Retry delay must be 1–3600 seconds.\";\n    if (!Number.isInteger(broker.maxRetryDelaySeconds) || broker.maxRetryDelaySeconds < broker.retryDelaySeconds || broker.maxRetryDelaySeconds > 3600)\n        return \"Maximum retry delay must be at least the retry delay and at most 3600 seconds.\";\n    const location = broker.certificateLocation ?? null;\n    const fingerprint = broker.certificateSha256 ?? null;\n    if (!broker.useTls) {\n        if (location !== null || fingerprint !== null) return \"Certificate settings need TLS. Enable TLS or remove the certificate.\";\n        return null;\n    }\n    if (typeof location !== \"string\" || location.trim() === \"\") return \"TLS needs a certificate location (file path or https URL).\";\n    // A drive or Unix path is a file; anything with a scheme must be https, so the trust anchor cannot be swapped in transit.\n    const scheme = /^([a-z][a-z0-9+.-]*):\\/\\//i.exec(location)?.[1]?.toLowerCase();\n    const isUrl = scheme !== undefined && scheme !== \"file\";\n    if (isUrl && scheme !== \"https\") return \"A certificate URL must use https.\";\n    if (fingerprint !== null && !/^[0-9a-f]{64}$/i.test(fingerprint)) return \"Certificate fingerprint must be a SHA-256 hash: 64 hexadecimal characters.\";\n    if (isUrl && fingerprint === null) return \"A certificate URL needs its SHA-256 fingerprint, so a replaced file is refused.\";\n    return null;\n}\n// Every field present, in a fixed order, so two profiles compare equal exactly when their settings match.\nfunction brokerRecord(broker) {\n    return Object.fromEntries(brokerFields.map(key => [key, broker[key] ?? null]));\n}\n// The gateway's identity and first-boot broker settings, from this tab's environment variables.\nconst settings = {\n    gatewayId: env.get(\"GATEWAY_ID\"),\n    brokerId: env.get(\"BROKER_ID\"),\n    trialSeconds: Number(env.get(\"BROKER_TRIAL_SECONDS\")),\n    databasePath: env.get(\"GATEWAY_DB\"),\n    stateDirectory: env.get(\"GATEWAY_STATE_DIR\"),\n    publishBatchSize: Number(env.get(\"PUBLISH_BATCH_SIZE\"))\n};\nconst useTls = String(env.get(\"MQTT_TLS\")) === \"true\";\nconst seed = brokerRecord({\n    id: settings.brokerId, host: env.get(\"MQTT_HOST\"), port: Number(env.get(\"MQTT_PORT\")), useTls,\n    certificateLocation: useTls ? env.get(\"MQTT_CA\") : null, certificateSha256: null,\n    keepAliveSeconds: Number(env.get(\"MQTT_KEEPALIVE_SECONDS\")), connectTimeoutSeconds: Number(env.get(\"MQTT_CONNECT_TIMEOUT_SECONDS\")),\n    retryDelaySeconds: Number(env.get(\"MQTT_RETRY_DELAY_SECONDS\")), maxRetryDelaySeconds: Number(env.get(\"MQTT_MAX_RETRY_DELAY_SECONDS\"))\n});\nconst seedProblem = brokerProblem(seed);\n// Retained gateway state. The broker publishes the Last Will here if the gateway vanishes without a clean disconnect.\nconst gatewayTopic = \"iot/gateway/\" + settings.gatewayId + \"/status\";\nif (seedProblem) throw new Error(\"Invalid MQTT_* settings on this tab: \" + seedProblem);\n\nlet stopped = false;\nconst timers = new Set();\nfunction sleep(ms) {\n    return new Promise(resolve => {\n        const timer = setTimeout(() => { timers.delete(timer); resolve(); }, ms);\n        timers.add(timer);\n    });\n}\nconst describe = broker => broker.id + \" \" + broker.host + \":\" + broker.port + (broker.useTls ? \" TLS\" : \"\");\nconst same = (a, b) => a === b || (a != null && b != null && JSON.stringify(brokerRecord(a)) === JSON.stringify(brokerRecord(b)));\nfunction event(type, details = {}) {\n    node.send([null, { topic: \"gateway/\" + type, payload: { event: type, at: new Date().toISOString(), ...details } }]);\n}\n\n// ---- Storage: the outbox, device sequence numbers and broker history, in one SQLite file. ----\nfs.mkdirSync(path.dirname(settings.databasePath), { recursive: true });\nconst db = await new Promise((resolve, reject) => {\n    const opened = new sqlite3.Database(settings.databasePath, error => error ? reject(error) : resolve(opened));\n});\ndb.configure(\"busyTimeout\", 5000);\nconst sql = {\n    run: (text, params = {}) => new Promise((resolve, reject) => db.run(text, params, function (error) { error ? reject(error) : resolve(this); })),\n    get: (text, params = {}) => new Promise((resolve, reject) => db.get(text, params, (error, row) => error ? reject(error) : resolve(row))),\n    all: (text, params = {}) => new Promise((resolve, reject) => db.all(text, params, (error, rows) => error ? reject(error) : resolve(rows))),\n    exec: text => new Promise((resolve, reject) => db.exec(text, error => error ? reject(error) : resolve()))\n};\n// Storage operations run one at a time, like the .NET Outbox's lock, so transactions never interleave.\nlet storageQueue = Promise.resolve();\nfunction exclusive(work) {\n    const result = storageQueue.then(work);\n    storageQueue = result.catch(() => {});\n    return result;\n}\nasync function transaction(work) {\n    await sql.run(\"BEGIN IMMEDIATE\");\n    try {\n        const result = await work();\n        await sql.run(\"COMMIT\");\n        return result;\n    } catch (error) {\n        await sql.run(\"ROLLBACK\").catch(() => {});\n        throw error;\n    }\n}\nawait sql.exec(\"PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON;\");\nif ((await sql.get(\"PRAGMA user_version\")).user_version < 1) {\n    await exclusive(() => transaction(() => sql.exec(`\n        CREATE TABLE BrokerHistory (\n            Id INTEGER PRIMARY KEY AUTOINCREMENT,\n            DisconnectedAt TEXT NOT NULL,\n            ReconnectedAt TEXT NULL,\n            DowntimeSeconds INTEGER NULL,\n            MessagesBuffered INTEGER NULL,\n            BufferedMessagesSent INTEGER NOT NULL DEFAULT 0\n        );\n        CREATE TABLE Outbox (\n            Id INTEGER PRIMARY KEY AUTOINCREMENT,\n            Kind TEXT NOT NULL,\n            DeviceId TEXT NOT NULL,\n            DeviceSeq INTEGER NULL,\n            Reading TEXT NULL,\n            CreatedAt INTEGER NOT NULL,\n            BrokerHistoryId INTEGER NULL REFERENCES BrokerHistory(Id) ON DELETE RESTRICT\n        );\n        CREATE UNIQUE INDEX IX_Outbox_DeviceId_DeviceSeq ON Outbox (DeviceId, DeviceSeq);\n        CREATE INDEX IX_Outbox_BrokerHistoryId ON Outbox (BrokerHistoryId);\n        CREATE TABLE Devices (DeviceId TEXT NOT NULL PRIMARY KEY, LastSeq INTEGER NOT NULL DEFAULT 0);\n        CREATE TABLE GatewayState (Key TEXT NOT NULL PRIMARY KEY, Value TEXT NOT NULL);\n        PRAGMA user_version = 1;\n    `)));\n}\n\nif ((await sql.get(\"PRAGMA user_version\")).user_version < 2) {\n    // IntakeOnline: whether the last stored message for the device said it is online (a reading) or offline.\n    await exclusive(() => transaction(() => sql.exec(`\n        ALTER TABLE Devices ADD COLUMN IntakeOnline INTEGER NOT NULL DEFAULT 0;\n        PRAGMA user_version = 2;\n    `)));\n}\n\n// Only this run's observed outage is active. Startup never reopens an unfinished row from a previous run.\nlet activeHistoryId = null;\nlet buffered = (await sql.get(\"SELECT COUNT(*) AS n FROM Outbox\")).n;\nconst lastSeq = Object.fromEntries((await sql.all(\"SELECT DeviceId, LastSeq FROM Devices\")).map(row => [row.DeviceId, row.LastSeq]));\n// Runs inside the caller's transaction.\nasync function insertStatus(kind, deviceId, message) {\n    await sql.run(`INSERT INTO Outbox (Kind, DeviceId, DeviceSeq, Reading, CreatedAt, BrokerHistoryId)\n        VALUES ($kind, $device, NULL, $reading, $now, $history)`,\n        { $kind: kind, $device: deviceId, $reading: JSON.stringify(message), $now: Date.now(), $history: activeHistoryId });\n    buffered++;\n}\nconst outbox = {\n    // Committed before publishing. The device's next reading number is taken in the same transaction, so it is never reused.\n    accept: reading => exclusive(() => transaction(async () => {\n        // A device coming online is announced before its reading, the JSON counterpart of a Sparkplug DBIRTH.\n        const known = await sql.get(\"SELECT IntakeOnline FROM Devices WHERE DeviceId = $device\", { $device: reading.deviceId });\n        if (known?.IntakeOnline !== 1) {\n            await insertStatus(\"online\", reading.deviceId, { deviceId: reading.deviceId, state: \"online\", timestamp: reading.timestamp });\n        }\n        const { LastSeq: seq } = await sql.get(`INSERT INTO Devices (DeviceId, LastSeq, IntakeOnline) VALUES ($device, 1, 1)\n            ON CONFLICT(DeviceId) DO UPDATE SET LastSeq = LastSeq + 1, IntakeOnline = 1 RETURNING LastSeq`, { $device: reading.deviceId });\n        await sql.run(`INSERT INTO Outbox (Kind, DeviceId, DeviceSeq, Reading, CreatedAt, BrokerHistoryId)\n            VALUES ('telemetry', $device, $seq, $reading, $now, $history)`,\n            { $device: reading.deviceId, $seq: seq, $reading: JSON.stringify(reading), $now: Date.now(), $history: activeHistoryId });\n        buffered++;\n        return seq;\n    })),\n    // Queued after the device's earlier readings, so subscribers see its last values before it goes offline.\n    acceptOffline: (deviceId, reason) => exclusive(() => transaction(async () => {\n        const known = await sql.get(\"SELECT IntakeOnline FROM Devices WHERE DeviceId = $device\", { $device: deviceId });\n        if (known?.IntakeOnline !== 1) return false;\n        await insertStatus(\"offline\", deviceId, { deviceId, state: \"offline\", reason, timestamp: new Date().toISOString() });\n        await sql.run(\"UPDATE Devices SET IntakeOnline = 0 WHERE DeviceId = $device\", { $device: deviceId });\n        return true;\n    })),\n    // Includes devices left online by a previous run, so a device disabled while Node-RED was stopped still goes offline.\n    intakeOnlineIds: () => exclusive(() => sql.all(\"SELECT DeviceId FROM Devices WHERE IntakeOnline = 1 ORDER BY DeviceId\"))\n        .then(rows => rows.map(row => row.DeviceId)),\n    peek: limit => exclusive(() => sql.all(\"SELECT Id, Kind, DeviceId, DeviceSeq, Reading, CreatedAt FROM Outbox ORDER BY Id LIMIT $limit\", { $limit: limit })),\n    // Deletes the acknowledged row and counts it for its outage in one transaction. A repeated ACK finds no row and changes nothing.\n    markSent: row => exclusive(() => transaction(async () => {\n        const deleted = await sql.get(\"DELETE FROM Outbox WHERE Id = $id RETURNING BrokerHistoryId\", { $id: row.Id });\n        if (!deleted) return;\n        if (deleted.BrokerHistoryId !== null)\n            await sql.run(\"UPDATE BrokerHistory SET BufferedMessagesSent = BufferedMessagesSent + 1 WHERE Id = $history\", { $history: deleted.BrokerHistoryId });\n        buffered--;\n    })),\n    recordDisconnected: at => exclusive(async () => {\n        if (activeHistoryId !== null) return;\n        activeHistoryId = (await sql.get(\"INSERT INTO BrokerHistory (DisconnectedAt) VALUES ($time) RETURNING Id\", { $time: at.toISOString() })).Id;\n    }),\n    recordConnected: at => exclusive(async () => {\n        const id = activeHistoryId;\n        if (id === null) return;\n        // Even if recording fails, new live messages must not be linked to the old outage.\n        activeHistoryId = null;\n        await transaction(async () => {\n            const { DisconnectedAt } = await sql.get(\"SELECT DisconnectedAt FROM BrokerHistory WHERE Id = $id\", { $id: id });\n            await sql.run(`UPDATE BrokerHistory SET ReconnectedAt = $time, DowntimeSeconds = $seconds,\n                MessagesBuffered = (SELECT COUNT(*) FROM Outbox WHERE BrokerHistoryId = $id) WHERE Id = $id`,\n                { $time: at.toISOString(), $seconds: Math.max(0, Math.floor((at.getTime() - Date.parse(DisconnectedAt)) / 1000)), $id: id });\n        });\n    }),\n    // NULL ReconnectedAt then means \"reconnection not recorded\", not necessarily \"broker still down\".\n    endObservation: () => { activeHistoryId = null; },\n    loadState: key => exclusive(() => sql.get(\"SELECT Value FROM GatewayState WHERE Key = $key\", { $key: key })).then(row => row?.Value ?? null),\n    saveState: (key, value) => exclusive(() => sql.run(`INSERT INTO GatewayState (Key, Value) VALUES ($key, $value)\n        ON CONFLICT(Key) DO UPDATE SET Value = excluded.Value`, { $key: key, $value: value }))\n};\nfunction historyFailed(error) {\n    // A diagnostics write must not turn a successful MQTT connection into a failed one.\n    node.warn(\"Broker history could not be recorded: \" + error.message);\n}\n\n// New readings wake the publisher at once instead of waiting for its next check.\nlet wakePublisher = null;\nfunction signalRows() {\n    const wake = wakePublisher;\n    wakePublisher = null;\n    wake?.();\n}\nfunction waitForRows(ms) {\n    return new Promise(resolve => {\n        const timer = setTimeout(() => { timers.delete(timer); resolve(); }, ms);\n        timers.add(timer);\n        wakePublisher = () => { clearTimeout(timer); timers.delete(timer); resolve(); };\n    });\n}\n\n// Readings, offline events and configuration checks wait here, in order, until storage accepts them.\n// A storage failure is retried every second.\nconst intake = [];\nlet intakeRunning = false;\nlet enabledIds = null;\nasync function store(item) {\n    if (item.kind === \"reading\") {\n        const id = item.reading.deviceId;\n        // A poll that finished after its device was disabled or deleted must not bring it back online.\n        if (enabledIds && !enabledIds.has(id)) {\n            node.log(\"Dropped a reading from \" + id + \", which is no longer enabled.\");\n            return;\n        }\n        lastSeq[id] = await outbox.accept(item.reading);\n    } else if (item.kind === \"offline\") {\n        if (await outbox.acceptOffline(item.deviceId, item.reason)) event(\"device-offline\", { deviceId: item.deviceId, reason: item.reason });\n    } else if (item.kind === \"reconcile\") {\n        // Disabled or deleted devices leave with an offline message, after their queued readings; also across restarts.\n        for (const id of await outbox.intakeOnlineIds()) {\n            if (item.enabled.has(id) || !(await outbox.acceptOffline(id, \"not enabled in configuration\"))) continue;\n            node.log(id + \" offline (not enabled in configuration).\");\n            event(\"device-offline\", { deviceId: id, reason: \"not enabled in configuration\" });\n        }\n    }\n}\nconst describeItem = item => item.kind === \"reading\" ? \"a reading from \" + item.reading.deviceId\n    : item.kind === \"offline\" ? \"the offline event of \" + item.deviceId : \"the configuration check\";\nasync function drainIntake() {\n    if (intakeRunning) return;\n    intakeRunning = true;\n    while (intake.length && !stopped) {\n        try {\n            await store(intake[0]);\n            intake.shift();\n            signalRows();\n        } catch (error) {\n            node.warn(\"Storage failed for \" + describeItem(intake[0]) + \" (\" + error.message + \"). Retrying in 1s; \" + intake.length + \" item(s) waiting.\");\n            await sleep(1000);\n        }\n    }\n    intakeRunning = false;\n    showStatus();\n}\n\n// ---- Broker settings: registry (desired), last working (kept in the database), tab settings (seed). ----\nconst profiles = { desired: null, lastGood: null };\ntry {\n    const saved = await outbox.loadState(\"broker-last-good\");\n    const candidate = saved ? brokerRecord(JSON.parse(saved)) : null;\n    if (candidate && !brokerProblem(candidate)) profiles.lastGood = candidate;\n} catch (error) {\n    node.warn(\"Ignored unreadable last working broker settings: \" + error.message);\n}\nconst fallback = () => profiles.lastGood ?? seed;\n\n// New registry settings get a trial window. If they never connect while the fallback does, they are rejected until\n// they change again. If neither connects after the window, both are tried in turn and the first to connect wins.\nconst selector = { candidate: null, candidateSince: 0, candidateError: null, rejected: null, rejectedReason: null, alternate: false };\nfunction forgetStaleRejection(desired) {\n    if (selector.rejected && !same(desired, selector.rejected)) {\n        selector.rejected = null;\n        selector.rejectedReason = null;\n    }\n}\nfunction nextBroker(now) {\n    const desired = profiles.desired;\n    const current = fallback();\n    forgetStaleRejection(desired);\n    if (!desired || same(desired, current) || same(desired, selector.rejected)) {\n        selector.candidate = null;\n        return current;\n    }\n    if (!same(selector.candidate, desired)) {\n        Object.assign(selector, { candidate: desired, candidateSince: now, candidateError: null, alternate: false });\n        node.log(\"Trying broker settings \" + describe(desired) + \" for up to \" + settings.trialSeconds + \"s; \" + describe(current) + \" stays the fallback.\");\n        event(\"broker-trying\", { broker: desired, fallback: current });\n    }\n    if (now - selector.candidateSince < settings.trialSeconds * 1000) return desired;\n    selector.alternate = !selector.alternate;\n    return selector.alternate ? current : desired;\n}\nasync function brokerConnected(broker) {\n    const candidate = selector.candidate;\n    if (candidate) {\n        if (same(broker, candidate)) {\n            node.log(\"New broker settings \" + describe(candidate) + \" work.\");\n            event(\"broker-accepted\", { broker: candidate });\n        } else {\n            selector.rejected = candidate;\n            selector.rejectedReason = selector.candidateError ?? \"no connection within \" + settings.trialSeconds + \"s\";\n            node.warn(\"Broker settings \" + describe(candidate) + \" rejected (\" + selector.rejectedReason + \"). Restored \" + describe(broker) + \".\");\n            event(\"broker-rejected\", { broker: candidate, reason: selector.rejectedReason, restored: broker });\n        }\n        selector.candidate = null;\n    }\n    if (same(profiles.lastGood, broker)) return;\n    profiles.lastGood = broker;\n    // Only a restart fallback is lost if this fails; the working connection is unaffected.\n    await outbox.saveState(\"broker-last-good\", JSON.stringify(broker))\n        .catch(error => node.warn(\"Last working broker settings not saved: \" + error.message));\n}\nfunction brokerFailed(broker, reason) {\n    if (same(broker, selector.candidate)) selector.candidateError = reason;\n}\nfunction shouldSwitch(active) {\n    const desired = profiles.desired;\n    forgetStaleRejection(desired);\n    return !!desired && !same(desired, active) && !same(desired, selector.rejected);\n}\nlet session = null;\nlet configured;\nconst firstConfig = new Promise(resolve => { configured = resolve; });\nfunction offer(broker) {\n    configured();\n    if (broker) {\n        const problem = brokerProblem(broker);\n        if (problem) {\n            node.warn(\"Ignored invalid broker settings \" + broker.id + \": \" + problem);\n            return;\n        }\n        broker = brokerRecord(broker);\n    }\n    if (same(profiles.desired, broker)) return;\n    profiles.desired = broker;\n    node.log(broker ? \"Broker settings from the registry: \" + describe(broker) + \".\"\n        : \"No broker settings in the registry for this gateway. Using the last working settings.\");\n    if (session && shouldSwitch(session.connection.broker)) session.end({ kind: \"switch\" });\n    showStatus();\n}\n\n// ---- Certificates: a file read on every connect, or an https URL downloaded once and cached under its fingerprint. ----\nconst fingerprintOf = certificate => certificate.fingerprint256.replace(/:/g, \"\").toLowerCase();\nfunction parseCertificate(bytes, source) {\n    try { return new crypto.X509Certificate(bytes); }\n    catch (error) { throw new Error(\"Certificate \" + source + \" is not a valid certificate: \" + error.message); }\n}\nfunction verified(certificate, expected, source) {\n    if (!expected || fingerprintOf(certificate) === expected.toLowerCase()) return certificate;\n    throw new Error(\"Certificate \" + source + \" has fingerprint \" + fingerprintOf(certificate) + \", not the pinned \" + expected.toLowerCase() + \".\");\n}\nfunction download(url) {\n    return new Promise((resolve, reject) => {\n        const request = https.get(url, { timeout: 10000 }, response => {\n            if (response.statusCode !== 200) {\n                response.resume();\n                reject(new Error(\"HTTP \" + response.statusCode));\n                return;\n            }\n            const chunks = [];\n            response.on(\"data\", chunk => chunks.push(chunk));\n            response.on(\"end\", () => resolve(Buffer.concat(chunks)));\n        });\n        request.on(\"timeout\", () => request.destroy(new Error(\"timed out\")));\n        request.on(\"error\", reject);\n    });\n}\nasync function loadCertificate(broker) {\n    const location = broker.certificateLocation;\n    if (!location) throw new Error(\"Broker \" + broker.id + \" uses TLS but names no certificate.\");\n    const scheme = /^([a-z][a-z0-9+.-]*):\\/\\//i.exec(location)?.[1]?.toLowerCase();\n    if (scheme === undefined || scheme === \"file\") {\n        let bytes;\n        try { bytes = fs.readFileSync(path.resolve(settings.stateDirectory, location)); }\n        catch (error) { throw new Error(\"Certificate \" + location + \" could not be read: \" + error.message); }\n        return verified(parseCertificate(bytes, location), broker.certificateSha256, location);\n    }\n    const fingerprint = broker.certificateSha256.toLowerCase();\n    const cachePath = path.join(settings.stateDirectory, \"certs\", fingerprint + \".crt\");\n    if (fs.existsSync(cachePath)) {\n        try { return verified(parseCertificate(fs.readFileSync(cachePath), cachePath), fingerprint, cachePath); }\n        catch (error) { fs.rmSync(cachePath, { force: true }); } // A damaged copy is fetched again.\n    }\n    let downloaded;\n    try { downloaded = await download(location); }\n    catch (error) { throw new Error(\"Certificate \" + location + \" could not be downloaded and is not cached: \" + error.message); }\n    const certificate = verified(parseCertificate(downloaded, location), fingerprint, location);\n    fs.mkdirSync(path.dirname(cachePath), { recursive: true });\n    fs.writeFileSync(cachePath + \".tmp\", downloaded);\n    fs.renameSync(cachePath + \".tmp\", cachePath);\n    return certificate;\n}\n\n// ---- MQTT connection ----\nconst connection = { state: \"starting\", since: new Date().toISOString(), broker: null, active: null, lastError: null, lastPublished: null };\nfunction setState(state, broker, details = {}) {\n    Object.assign(connection, { state, since: new Date().toISOString(), broker, retryInSeconds: null }, details);\n    showStatus();\n}\nasync function connect(broker) {\n    let ca;\n    let certificateExpires = null;\n    if (broker.useTls) {\n        const certificate = await loadCertificate(broker);\n        ca = certificate.toString();\n        certificateExpires = new Date(certificate.validTo).toISOString();\n    }\n    const client = await new Promise((resolve, reject) => {\n        const client = mqtt.connect({\n            protocol: broker.useTls ? \"mqtts\" : \"mqtt\", host: broker.host, port: broker.port,\n            clientId: settings.gatewayId, clean: true, protocolVersion: 4,\n            keepalive: broker.keepAliveSeconds, connectTimeout: broker.connectTimeoutSeconds * 1000,\n            reconnectPeriod: 0, ca, rejectUnauthorized: true,\n            // A crash, kill or lost network leaves this behind: the broker announces the gateway offline itself.\n            will: { topic: gatewayTopic, qos: 1, retain: true,\n                payload: JSON.stringify({ gatewayId: settings.gatewayId, state: \"offline\", reason: \"connection lost\", broker: describe(broker) }) }\n        });\n        const timer = setTimeout(() => fail(new Error(\"connection timed out\")), broker.connectTimeoutSeconds * 1000 + 1000);\n        function settle() {\n            clearTimeout(timer);\n            client.removeListener(\"connect\", accepted);\n            client.removeListener(\"error\", fail);\n            client.removeListener(\"close\", closed);\n        }\n        function accepted() { settle(); resolve(client); }\n        function fail(error) {\n            settle();\n            client.on(\"error\", () => {});\n            client.end(true);\n            reject(error);\n        }\n        function closed() { fail(new Error(\"connection closed before the broker accepted it\")); }\n        client.on(\"connect\", accepted);\n        client.on(\"error\", fail);\n        client.on(\"close\", closed);\n    });\n    // Errors after this point arrive as a close, which ends the session.\n    client.on(\"error\", () => {});\n    return { client, broker, certificateExpires, intentional: false };\n}\nfunction publishGatewayStatus(open, state, reason) {\n    const message = { gatewayId: settings.gatewayId, state, timestamp: new Date().toISOString(), broker: describe(open.broker) };\n    if (reason) message.reason = reason;\n    return open.client.publishAsync(gatewayTopic, JSON.stringify(message), { qos: 1, retain: true });\n}\n// A clean disconnect cancels the Last Will, so the gateway announces its own offline state first.\nfunction closeConnection(open, reason) {\n    if (open.closing) return open.closing;\n    open.intentional = true;\n    open.closing = (async () => {\n        if (!open.client.disconnected) {\n            let timer;\n            await Promise.race([\n                publishGatewayStatus(open, \"offline\", reason),\n                new Promise(resolve => { timer = setTimeout(resolve, 2000); })\n            ]).catch(() => {});\n            clearTimeout(timer);\n        }\n        await new Promise(resolve => {\n            const timer = setTimeout(() => open.client.end(true, {}, resolve), 5000);\n            open.client.end(false, {}, () => { clearTimeout(timer); resolve(); });\n        });\n        if (current === open) current = null;\n    })();\n    return open.closing;\n}\nlet current = null;\n\n// One loop keeps the publish order: oldest outbox row first, one at a time, each deleted only after its PUBACK.\nfunction runSession(open) {\n    const sessionStart = Date.now();\n    let finished = false;\n    let resolveEnd;\n    const ended = new Promise(resolve => { resolveEnd = resolve; });\n    const end = result => {\n        if (finished) return;\n        finished = true;\n        session = null;\n        signalRows();\n        resolveEnd(result);\n    };\n    session = { connection: open, end };\n    open.client.on(\"close\", () => {\n        if (!open.intentional) outbox.recordDisconnected(new Date()).catch(historyFailed);\n        end({ kind: \"disconnected\" });\n    });\n    (async () => {\n        let announced = false;\n        try {\n            while (!finished) {\n                const rows = await outbox.peek(settings.publishBatchSize);\n                if (!rows.length) {\n                    await waitForRows(1000);\n                    continue;\n                }\n                if (!announced && rows[0].CreatedAt < sessionStart) {\n                    node.log(\"Replaying \" + buffered + \" buffered message(s).\");\n                    event(\"replay\", { buffered });\n                    announced = true;\n                }\n                for (const row of rows) {\n                    if (finished) break;\n                    const historical = row.CreatedAt < sessionStart;\n                    const telemetry = row.Kind === \"telemetry\";\n                    const topic = \"iot/\" + row.DeviceId + (telemetry ? \"/telemetry\" : \"/status\");\n                    const payload = telemetry ? { ...JSON.parse(row.Reading), seq: row.DeviceSeq, historical } : { ...JSON.parse(row.Reading), historical };\n                    await open.client.publishAsync(topic, JSON.stringify(payload), { qos: 1, retain: false });\n                    await outbox.markSent(row);\n                    connection.lastPublished = row.DeviceId + (telemetry ? \" #\" + row.DeviceSeq : \" \" + row.Kind);\n                    node.send([{ topic, payload }, null]);\n                    showStatus();\n                }\n            }\n        } catch (error) {\n            end({ kind: \"error\", error });\n        }\n    })();\n    return ended;\n}\n\nasync function run() {\n    // Use the registry's broker from the start when it answers quickly; otherwise start on the fallback.\n    await Promise.race([firstConfig, sleep(5000)]);\n    let broker = nextBroker(Date.now());\n    let delay = broker.retryDelaySeconds;\n    let attempt = 0;\n    let lastFailure = null;\n    let reportedAt = 0;\n    while (!stopped) {\n        broker = nextBroker(Date.now());\n        let open = null;\n        let switching = false;\n        let operation = \"connect\";\n        try {\n            setState(\"connecting\", broker);\n            try {\n                open = await connect(broker);\n            } catch (error) {\n                if (!stopped) await outbox.recordDisconnected(new Date()).catch(historyFailed);\n                throw error;\n            }\n            current = open;\n            if (stopped) {\n                await closeConnection(open, \"stopped\");\n                break;\n            }\n            await outbox.recordConnected(new Date()).catch(historyFailed);\n            node.log(\"MQTT \" + (attempt === 0 ? \"connected\" : \"connection restored\") + \". Broker: \" + broker.host + \":\" + broker.port);\n            // Like the .NET node birth: announced before the settings count as working and before any replay.\n            operation = \"publish gateway status\";\n            await publishGatewayStatus(open, \"online\");\n            await brokerConnected(broker);\n            connection.active = { broker, certificateExpires: open.certificateExpires };\n            attempt = 0;\n            delay = broker.retryDelaySeconds;\n            lastFailure = null;\n            setState(\"online\", broker, { lastError: null });\n            event(\"online\", { broker });\n            operation = \"publish/replay\";\n            const result = await runSession(open);\n            if (result.kind === \"switch\") {\n                node.log(\"Broker settings changed in the registry. Ending this session to switch.\");\n                switching = true;\n            } else if (result.kind === \"error\") {\n                throw result.error;\n            } else if (!stopped) {\n                throw new Error(\"connection lost\");\n            }\n        } catch (error) {\n            if (stopped) break;\n            const reason = describe(broker) + \" \" + operation + \": \" + error.message;\n            if (reason !== lastFailure || Date.now() - reportedAt >= 30000) {\n                node.warn(\"Connection failed: \" + reason + \". Retrying in \" + delay + \"s.\");\n                event(\"connection-failed\", { broker, operation, error: error.message, retryInSeconds: delay });\n                lastFailure = reason;\n                reportedAt = Date.now();\n            }\n            connection.lastError = reason;\n            brokerFailed(broker, error.message);\n        }\n        if (open) {\n            // An intentional close, so a switch or a publish failure is not recorded as a broker outage.\n            if (!open.client.disconnected)\n                await closeConnection(open, stopped ? \"stopped\" : switching ? \"switching to new broker settings\" : \"reconnecting after an error\");\n            else {\n                // Already closed: ending the client fails any publish still waiting for its PUBACK, so it stays in the outbox.\n                open.intentional = true;\n                open.client.end(true);\n            }\n        }\n        if (stopped) break;\n        if (switching) continue; // New settings are tried at once; readings wait in the outbox meanwhile.\n        attempt++;\n        setState(\"retry-waiting\", broker, { retryInSeconds: delay });\n        await sleep(delay * 1000);\n        delay = Math.min(delay * 2, broker.maxRetryDelaySeconds);\n    }\n}\n\n// ---- Status: what status.json reports in the .NET gateway, kept in global context for /api/gateway/status. ----\nfunction brokerState() {\n    const active = connection.active?.broker ?? null;\n    const source = !active ? \"none\"\n        : same(active, profiles.desired) ? \"registry\"\n        : same(active, profiles.lastGood) ? \"last-good\"\n        : same(active, seed) ? \"seed\" : \"previous\";\n    forgetStaleRejection(profiles.desired);\n    return {\n        active, source,\n        trying: selector.candidate, tryingSince: selector.candidate ? new Date(selector.candidateSince).toISOString() : null,\n        rejected: selector.rejected, rejectedReason: selector.rejectedReason,\n        certificateExpires: connection.active?.certificateExpires ?? null\n    };\n}\nfunction showStatus() {\n    const status = {\n        gatewayId: settings.gatewayId,\n        statusTopic: gatewayTopic,\n        defaultBrokerId: settings.brokerId,\n        connection: { state: connection.state, since: connection.since, broker: connection.broker, retryInSeconds: connection.retryInSeconds ?? null },\n        broker: brokerState(),\n        buffered: buffered + intake.filter(item => item.kind !== \"reconcile\").length,\n        deviceSeq: lastSeq,\n        lastPublished: connection.lastPublished,\n        lastError: connection.lastError,\n        updatedAt: new Date().toISOString()\n    };\n    global.set(\"iotGatewayStatus\", status);\n    const where = connection.broker ? connection.broker.host + \":\" + connection.broker.port : \"\";\n    node.status({\n        fill: connection.state === \"online\" ? \"green\" : connection.state === \"connecting\" ? \"yellow\" : \"red\",\n        shape: \"dot\",\n        text: connection.state + \" \" + where + \" · \" + status.buffered + \" buffered\"\n    });\n}\n\ncontext.set(\"gateway\", {\n    accept(reading) {\n        intake.push({ kind: \"reading\", reading });\n        drainIntake();\n    },\n    offline(deviceId, reason) {\n        intake.push({ kind: \"offline\", deviceId, reason });\n        drainIntake();\n    },\n    applyDevices(devices) {\n        enabledIds = new Set(devices.filter(device => device.enabled).map(device => device.id));\n        intake.push({ kind: \"reconcile\", enabled: enabledIds });\n        drainIntake();\n    },\n    offer,\n    stop() {\n        stopped = true;\n        if (intake.length) node.warn(\"Stopped with \" + intake.length + \" reading(s) not yet stored.\");\n        for (const timer of timers) clearTimeout(timer);\n        timers.clear();\n        const open = session?.connection ?? current;\n        session?.end({ kind: \"stopped\" });\n        if (open) closeConnection(open, \"stopped\");\n        outbox.endObservation();\n        setState(\"stopped\", null);\n        exclusive(() => new Promise(resolve => db.close(() => resolve())));\n    }\n});\nshowStatus();\nrun().catch(error => node.error(\"Gateway connection loop stopped: \" + error.message));",
+    "finalize": "context.get(\"gateway\")?.stop();",
+    "libs": [
+      {
+        "var": "mqtt",
+        "module": "mqtt"
+      },
+      {
+        "var": "sqlite3",
+        "module": "sqlite3"
+      },
+      {
+        "var": "fs",
+        "module": "fs"
+      },
+      {
+        "var": "path",
+        "module": "path"
+      },
+      {
+        "var": "crypto",
+        "module": "crypto"
+      },
+      {
+        "var": "https",
+        "module": "https"
+      }
+    ],
+    "x": 430,
+    "y": 320,
+    "wires": [
+      [
+        "modbus_errors"
+      ],
+      [
+        "gateway_status"
+      ]
+    ]
+  },
+  {
+    "id": "gateway_status",
+    "type": "debug",
+    "z": "tab_modbus_mqtt",
+    "name": "Gateway status",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 680,
+    "y": 380,
+    "wires": []
+  },
+  {
+    "id": "broker_route_0",
+    "type": "http in",
+    "z": "f937eaa01d565cc0",
+    "name": "GET Brokers",
+    "url": "/api/brokers",
+    "method": "get",
+    "upload": false,
+    "skipBodyParsing": false,
+    "swaggerDoc": "",
+    "x": 160,
+    "y": 900,
+    "wires": [
+      [
+        "broker_api"
+      ]
+    ]
+  },
+  {
+    "id": "broker_route_1",
+    "type": "http in",
+    "z": "f937eaa01d565cc0",
+    "name": "GET Broker",
+    "url": "/api/brokers/:id",
+    "method": "get",
+    "upload": false,
+    "skipBodyParsing": false,
+    "swaggerDoc": "",
+    "x": 160,
+    "y": 950,
+    "wires": [
+      [
+        "broker_api"
+      ]
+    ]
+  },
+  {
+    "id": "broker_route_2",
+    "type": "http in",
+    "z": "f937eaa01d565cc0",
+    "name": "POST Broker",
+    "url": "/api/brokers",
+    "method": "post",
+    "upload": false,
+    "skipBodyParsing": false,
+    "swaggerDoc": "",
+    "x": 160,
+    "y": 1000,
+    "wires": [
+      [
+        "broker_api"
+      ]
+    ]
+  },
+  {
+    "id": "broker_route_3",
+    "type": "http in",
+    "z": "f937eaa01d565cc0",
+    "name": "PUT Broker",
+    "url": "/api/brokers/:id",
+    "method": "put",
+    "upload": false,
+    "skipBodyParsing": false,
+    "swaggerDoc": "",
+    "x": 160,
+    "y": 1050,
+    "wires": [
+      [
+        "broker_api"
+      ]
+    ]
+  },
+  {
+    "id": "broker_route_4",
+    "type": "http in",
+    "z": "f937eaa01d565cc0",
+    "name": "DELETE Broker",
+    "url": "/api/brokers/:id",
+    "method": "delete",
+    "upload": false,
+    "skipBodyParsing": false,
+    "swaggerDoc": "",
+    "x": 160,
+    "y": 1100,
+    "wires": [
+      [
+        "broker_api"
+      ]
+    ]
+  },
+  {
+    "id": "broker_route_5",
+    "type": "http in",
+    "z": "f937eaa01d565cc0",
+    "name": "GET Gateway brokers",
+    "url": "/api/gateways",
+    "method": "get",
+    "upload": false,
+    "skipBodyParsing": false,
+    "swaggerDoc": "",
+    "x": 160,
+    "y": 1150,
+    "wires": [
+      [
+        "broker_api"
+      ]
+    ]
+  },
+  {
+    "id": "broker_route_6",
+    "type": "http in",
+    "z": "f937eaa01d565cc0",
+    "name": "PUT Gateway broker",
+    "url": "/api/gateways/:id",
+    "method": "put",
+    "upload": false,
+    "skipBodyParsing": false,
+    "swaggerDoc": "",
+    "x": 160,
+    "y": 1200,
+    "wires": [
+      [
+        "broker_api"
+      ]
+    ]
+  },
+  {
+    "id": "broker_route_7",
+    "type": "http in",
+    "z": "f937eaa01d565cc0",
+    "name": "DELETE Gateway broker",
+    "url": "/api/gateways/:id",
+    "method": "delete",
+    "upload": false,
+    "skipBodyParsing": false,
+    "swaggerDoc": "",
+    "x": 160,
+    "y": 1250,
+    "wires": [
+      [
+        "broker_api"
+      ]
+    ]
+  },
+  {
+    "id": "broker_api",
+    "type": "function",
+    "z": "f937eaa01d565cc0",
+    "name": "Broker settings API",
+    "func": "// Broker settings rules, the same as the .NET BrokerProfile.Validate(). Returns a problem, or null when valid.\nconst brokerFields = [\"id\", \"host\", \"port\", \"useTls\", \"certificateLocation\", \"certificateSha256\",\n    \"keepAliveSeconds\", \"connectTimeoutSeconds\", \"retryDelaySeconds\", \"maxRetryDelaySeconds\"];\nfunction validId(value) {\n    return typeof value === \"string\" && value.trim() !== \"\" && !/[\\s\\/+#]/.test(value);\n}\nfunction brokerProblem(broker) {\n    if (!broker || typeof broker !== \"object\" || Array.isArray(broker)) return \"Provide a broker JSON object.\";\n    const unknown = Object.keys(broker).filter(key => !brokerFields.includes(key));\n    if (unknown.length) return \"Unknown broker field(s): \" + unknown.join(\", \") + \".\";\n    const whole = (value, min, max) => Number.isInteger(value) && value >= min && value <= max;\n    if (!validId(broker.id)) return \"Broker ID must be nonempty and must not contain /, +, # or whitespace.\";\n    if (typeof broker.host !== \"string\" || broker.host.trim() === \"\" || /\\s/.test(broker.host)) return \"Broker host is required and must not contain spaces.\";\n    if (!whole(broker.port, 1, 65535)) return \"Broker port must be between 1 and 65535.\";\n    if (typeof broker.useTls !== \"boolean\") return \"useTls must be true or false.\";\n    // Keep-alive also bounds how long a silently dead broker goes unnoticed while idle.\n    if (!whole(broker.keepAliveSeconds, 5, 3600)) return \"Keep-alive must be 5–3600 seconds.\";\n    if (!whole(broker.connectTimeoutSeconds, 1, 300)) return \"Connect timeout must be 1–300 seconds.\";\n    if (!whole(broker.retryDelaySeconds, 1, 3600)) return \"Retry delay must be 1–3600 seconds.\";\n    if (!Number.isInteger(broker.maxRetryDelaySeconds) || broker.maxRetryDelaySeconds < broker.retryDelaySeconds || broker.maxRetryDelaySeconds > 3600)\n        return \"Maximum retry delay must be at least the retry delay and at most 3600 seconds.\";\n    const location = broker.certificateLocation ?? null;\n    const fingerprint = broker.certificateSha256 ?? null;\n    if (!broker.useTls) {\n        if (location !== null || fingerprint !== null) return \"Certificate settings need TLS. Enable TLS or remove the certificate.\";\n        return null;\n    }\n    if (typeof location !== \"string\" || location.trim() === \"\") return \"TLS needs a certificate location (file path or https URL).\";\n    // A drive or Unix path is a file; anything with a scheme must be https, so the trust anchor cannot be swapped in transit.\n    const scheme = /^([a-z][a-z0-9+.-]*):\\/\\//i.exec(location)?.[1]?.toLowerCase();\n    const isUrl = scheme !== undefined && scheme !== \"file\";\n    if (isUrl && scheme !== \"https\") return \"A certificate URL must use https.\";\n    if (fingerprint !== null && !/^[0-9a-f]{64}$/i.test(fingerprint)) return \"Certificate fingerprint must be a SHA-256 hash: 64 hexadecimal characters.\";\n    if (isUrl && fingerprint === null) return \"A certificate URL needs its SHA-256 fingerprint, so a replaced file is refused.\";\n    return null;\n}\n// Every field present, in a fixed order, so two profiles compare equal exactly when their settings match.\nfunction brokerRecord(broker) {\n    return Object.fromEntries(brokerFields.map(key => [key, broker[key] ?? null]));\n}\nconst db = context.get(\"db\");\nconst run = (sql, params = {}) => new Promise((resolve, reject) => db.run(sql, params, function (error) { error ? reject(error) : resolve(this); }));\nconst get = (sql, params = {}) => new Promise((resolve, reject) => db.get(sql, params, (error, row) => error ? reject(error) : resolve(row)));\nconst all = (sql, params = {}) => new Promise((resolve, reject) => db.all(sql, params, (error, rows) => error ? reject(error) : resolve(rows)));\n\nconst fromRow = row => ({\n    id: row.Id, host: row.Host, port: row.Port, useTls: row.UseTls === 1,\n    certificateLocation: row.CertificateLocation, certificateSha256: row.CertificateSha256,\n    keepAliveSeconds: row.KeepAliveSeconds, connectTimeoutSeconds: row.ConnectTimeoutSeconds,\n    retryDelaySeconds: row.RetryDelaySeconds, maxRetryDelaySeconds: row.MaxRetryDelaySeconds\n});\nconst toParams = broker => ({\n    $id: broker.id, $host: broker.host, $port: broker.port, $tls: broker.useTls ? 1 : 0,\n    $location: broker.certificateLocation ?? null, $sha: broker.certificateSha256?.toLowerCase() ?? null,\n    $keepAlive: broker.keepAliveSeconds, $connectTimeout: broker.connectTimeoutSeconds,\n    $retry: broker.retryDelaySeconds, $maxRetry: broker.maxRetryDelaySeconds\n});\nfunction reply(statusCode, payload = \"\") {\n    msg.statusCode = statusCode;\n    msg.payload = payload;\n    return msg;\n}\n\nconst method = msg.req.method;\nconst id = msg.req.params.id;\nconst gateways = msg.req.originalUrl.startsWith(\"/api/gateways\");\ntry {\n    if (!gateways) {\n        if (method === \"GET\" && id === undefined)\n            return reply(200, (await all(\"SELECT * FROM Brokers ORDER BY Id\")).map(fromRow));\n        if (method === \"GET\") {\n            const row = await get(\"SELECT * FROM Brokers WHERE Id = $id\", { $id: id });\n            return row ? reply(200, fromRow(row)) : reply(404, { error: \"Broker not found.\" });\n        }\n        if (method === \"DELETE\") {\n            if (!(await get(\"SELECT 1 AS found FROM Brokers WHERE Id = $id\", { $id: id }))) return reply(404, { error: \"Broker not found.\" });\n            if ((await get(\"SELECT COUNT(*) AS n FROM Brokers\")).n === 1) return reply(409, { error: \"The only broker cannot be deleted.\" });\n            if (await get(\"SELECT 1 AS found FROM GatewayBrokers WHERE BrokerId = $id\", { $id: id }))\n                return reply(409, { error: \"A gateway uses this broker. Assign it another broker first.\" });\n            await run(\"DELETE FROM Brokers WHERE Id = $id\", { $id: id });\n            return reply(204);\n        }\n        const broker = msg.payload;\n        const problem = brokerProblem(broker);\n        if (problem) return reply(400, { error: problem });\n        if (method === \"PUT\" && broker.id !== id) return reply(400, { error: \"Broker ID must match the URL.\" });\n        broker.certificateSha256 = broker.certificateSha256?.toLowerCase() ?? null;\n        const values = \"$id, $host, $port, $tls, $location, $sha, $keepAlive, $connectTimeout, $retry, $maxRetry\";\n        if (method === \"POST\") {\n            try {\n                await run(`INSERT INTO Brokers VALUES (${values})`, toParams(broker));\n            } catch (error) {\n                if (/UNIQUE|PRIMARY KEY/.test(error.message)) return reply(409, { error: \"Broker ID already exists.\" });\n                throw error;\n            }\n            return reply(201, brokerRecord(broker));\n        }\n        const updated = await run(`UPDATE Brokers SET Host = $host, Port = $port, UseTls = $tls, CertificateLocation = $location,\n            CertificateSha256 = $sha, KeepAliveSeconds = $keepAlive, ConnectTimeoutSeconds = $connectTimeout,\n            RetryDelaySeconds = $retry, MaxRetryDelaySeconds = $maxRetry WHERE Id = $id`, toParams(broker));\n        return updated.changes ? reply(200, brokerRecord(broker)) : reply(404, { error: \"Broker not found.\" });\n    }\n\n    // Which broker a gateway uses. Without an assignment it uses its own BROKER_ID setting.\n    if (method === \"GET\")\n        return reply(200, (await all(\"SELECT GatewayId, BrokerId FROM GatewayBrokers ORDER BY GatewayId\"))\n            .map(row => ({ gatewayId: row.GatewayId, brokerId: row.BrokerId })));\n    if (method === \"DELETE\") {\n        const removed = await run(\"DELETE FROM GatewayBrokers WHERE GatewayId = $id\", { $id: id });\n        return removed.changes ? reply(204) : reply(404, { error: \"Gateway has no broker assignment.\" });\n    }\n    const assignment = msg.payload;\n    if (!assignment || typeof assignment !== \"object\" || Object.keys(assignment).some(key => ![\"gatewayId\", \"brokerId\"].includes(key)))\n        return reply(400, { error: \"Provide only gatewayId and brokerId.\" });\n    if (!validId(assignment.gatewayId) || !validId(assignment.brokerId))\n        return reply(400, { error: \"Gateway and broker IDs must be nonempty and must not contain /, +, # or whitespace.\" });\n    if (assignment.gatewayId !== id) return reply(400, { error: \"Gateway ID must match the URL.\" });\n    if (!(await get(\"SELECT 1 AS found FROM Brokers WHERE Id = $id\", { $id: assignment.brokerId })))\n        return reply(400, { error: \"Broker \" + assignment.brokerId + \" does not exist.\" });\n    await run(`INSERT INTO GatewayBrokers (GatewayId, BrokerId) VALUES ($gateway, $broker)\n        ON CONFLICT(GatewayId) DO UPDATE SET BrokerId = excluded.BrokerId`, { $gateway: id, $broker: assignment.brokerId });\n    return reply(200, assignment);\n} catch (error) {\n    node.error(error.message, msg);\n    return reply(500, { error: \"Unable to access the broker registry.\" });\n}",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "// Broker settings live in the registry database beside the devices, like the .NET configuration service.\nconst db = await new Promise((resolve, reject) => {\n    const opened = new sqlite3.Database(env.get(\"REGISTRY_DB\"), error => error ? reject(error) : resolve(opened));\n});\ndb.configure(\"busyTimeout\", 5000);\nawait new Promise((resolve, reject) => db.exec(`\n    PRAGMA foreign_keys = ON;\n    CREATE TABLE IF NOT EXISTS Brokers (\n        Id TEXT NOT NULL PRIMARY KEY,\n        Host TEXT NOT NULL,\n        Port INTEGER NOT NULL CHECK (Port BETWEEN 1 AND 65535),\n        UseTls INTEGER NOT NULL,\n        CertificateLocation TEXT NULL,\n        CertificateSha256 TEXT NULL,\n        KeepAliveSeconds INTEGER NOT NULL,\n        ConnectTimeoutSeconds INTEGER NOT NULL,\n        RetryDelaySeconds INTEGER NOT NULL,\n        MaxRetryDelaySeconds INTEGER NOT NULL\n    );\n    CREATE TABLE IF NOT EXISTS GatewayBrokers (\n        GatewayId TEXT NOT NULL PRIMARY KEY,\n        BrokerId TEXT NOT NULL REFERENCES Brokers(Id) ON DELETE RESTRICT\n    );\n    CREATE INDEX IF NOT EXISTS IX_GatewayBrokers_BrokerId ON GatewayBrokers(BrokerId);\n`, error => error ? reject(error) : resolve()));\n// Seeded once, with the values the gateway uses before the registry is reachable.\nawait new Promise((resolve, reject) => db.run(`\n    INSERT INTO Brokers SELECT 'local', $host, 8883, 1, $certificate, NULL, 60, 10, 2, 30\n    WHERE NOT EXISTS (SELECT 1 FROM Brokers)\n`, { $host: env.get(\"SEED_BROKER_HOST\"), $certificate: env.get(\"SEED_BROKER_CERTIFICATE\") }, error => error ? reject(error) : resolve()));\ncontext.set(\"db\", db);",
+    "finalize": "context.get(\"db\")?.close();",
+    "libs": [
+      {
+        "var": "sqlite3",
+        "module": "sqlite3"
+      }
+    ],
+    "x": 450,
+    "y": 1075,
+    "wires": [
+      [
+        "broker_api_response",
+        "registry_changed"
+      ]
+    ]
+  },
+  {
+    "id": "broker_api_response",
+    "type": "http response",
+    "z": "f937eaa01d565cc0",
+    "name": "Broker API response",
+    "statusCode": "",
+    "headers": {
+      "content-type": "application/json"
+    },
+    "x": 740,
+    "y": 1075,
+    "wires": []
+  },
+  {
+    "id": "gateway_status_route",
+    "type": "http in",
+    "z": "f937eaa01d565cc0",
+    "name": "GET Gateway status",
+    "url": "/api/gateway/status",
+    "method": "get",
+    "upload": false,
+    "skipBodyParsing": false,
+    "swaggerDoc": "",
+    "x": 170,
+    "y": 1320,
+    "wires": [
+      [
+        "gateway_status_api"
+      ]
+    ]
+  },
+  {
+    "id": "gateway_status_api",
+    "type": "function",
+    "z": "f937eaa01d565cc0",
+    "name": "Gateway status",
+    "func": "// What the .NET gateway writes to status.json: connection state, broker in use, trial and rejection, buffered count,\n// and every enabled device's polling state.\nconst gateway = global.get(\"iotGatewayStatus\");\nconst statuses = global.get(\"iotDeviceStatus\") || {};\nmsg.statusCode = 200;\nmsg.payload = {\n    ...(gateway ?? { connection: { state: \"not-started\" } }),\n    devices: Object.values(statuses).sort((a, b) => a.deviceId.localeCompare(b.deviceId)).map(status => ({\n        deviceId: status.deviceId, state: status.state, endpoint: status.endpoint, frames: status.frames,\n        lastSeq: gateway?.deviceSeq?.[status.deviceId] ?? 0, failures: status.failures,\n        lastPollAt: status.lastPollAt, lastSuccessAt: status.lastSuccessAt, lastError: status.lastError,\n        lastRaw: status.lastRaw, lastValues: status.lastValues\n    }))\n};\ndelete msg.payload.deviceSeq;\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 450,
+    "y": 1320,
+    "wires": [
+      [
+        "broker_api_response"
+      ]
+    ]
+  }
+]

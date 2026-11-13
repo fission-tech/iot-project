@@ -1,0 +1,15 @@
+{
+  "name": "iot-nodered-tests",
+  "private": true,
+  "description": "Unit and end-to-end tests for nodered/flows.json",
+  "scripts": {
+    "test": "node --test \"unit/*.test.js\"",
+    "test:e2e": "node --test --test-concurrency=1 \"e2e/*.test.js\"",
+    "test:all": "npm test && npm run test:e2e"
+  },
+  "devDependencies": {
+    "aedes": "1.2.0",
+    "mqtt": "5.16.1",
+    "sqlite3": "6.0.1"
+  }
+}

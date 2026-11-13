@@ -1,0 +1,11 @@
+{
+  "name": "iot-nodered-runtime",
+  "description": "npm modules the flow's nodes load, installed into the Node-RED user directory of the Docker image",
+  "private": true,
+  "dependencies": {
+    "modbus-serial": "8.0.25",
+    "mqtt": "5.16.1",
+    "node-red-node-sqlite": "2.0.1",
+    "sqlite3": "6.0.1"
+  }
+}

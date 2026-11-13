@@ -107,6 +107,10 @@ This starts the configuration service and runs the gateway in the terminal. Regi
 
 In MQTTX, connect to `127.0.0.1:8883` with TLS, trust `broker/certs/broker.crt`, use a unique client ID, and subscribe to `spBv1.0/warehouse-01/#` before starting the gateway. To decode payloads, import `schemas/sparkplug_b.proto` and select `org.eclipse.tahu.protobuf.Payload`.
 
+## Node-RED registry poller (JSON/MQTT phase)
+
+The Node-RED registry branch extends the existing Modbus Read → Scale and format → Debug/MQTT path. It uses the Configuration API and Demo Console's device/interface editor, dynamically plans Modbus frames, and feeds decoded JSON into the existing MQTT Out node. See [nodered/README.md](nodered/README.md). Stop the .NET Gateway while Node-RED polls the same devices. The existing Sparkplug historian/Grafana path does not ingest these JSON readings yet.
+
 ## Reliability behaviour
 
 - **Broker connection history:** the Gateway records observed outages, reconnect times, downtime and buffered/acknowledged message counts in `BrokerHistory` inside its runtime DB. Gateway schema is managed by EF Core migrations, applied at startup. The initial switch from pre-EF storage requires a fresh Gateway DB; Configuration DB is kept. See [broker-history.md](docs/broker-history.md) for migrations, schema, NULL meaning, limits and manual demo steps.

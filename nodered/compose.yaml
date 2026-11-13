@@ -1,0 +1,92 @@
+# The Node-RED variant, self-contained: `docker compose up -d` in this folder.
+# Host ports can be changed with NODE_RED_PORT, MQTT_PORT and SIM_PORT (for example in a .env file next to this one).
+name: iot-nodered
+
+services:
+  # Creates the broker certificate on the first start. state/docker/certs is on the host, so MQTTX can trust it.
+  certs:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: certs
+    volumes:
+      - ./state/docker/certs:/certs
+    restart: "no"
+
+  mosquitto:
+    image: eclipse-mosquitto:2.1.2-alpine
+    depends_on:
+      certs:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:${MQTT_PORT:-8883}:8883"
+    volumes:
+      - type: bind
+        source: ../broker/mosquitto-docker.conf
+        target: /mosquitto/config/mosquitto.conf
+        read_only: true
+      - ./state/docker/certs:/mosquitto/certs:ro
+      - mosquitto-data:/mosquitto/data
+    restart: unless-stopped
+
+  nodered:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: runtime
+    depends_on:
+      certs:
+        condition: service_completed_successfully
+      mosquitto:
+        condition: service_started
+    ports:
+      - "127.0.0.1:${NODE_RED_PORT:-1880}:1880"
+    volumes:
+      - nodered-state:/data/state
+      - ./state/docker/certs:/certs:ro
+    # Devices on this computer (ModSim, the test server) are reached as host.docker.internal.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  # Test Modbus server: docker compose --profile sim up -d. Devices use host "modbus-sim", port 1502.
+  modbus-sim:
+    profiles: [sim]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: tools
+    environment:
+      E2E_LISTEN: 0.0.0.0
+    command: ["node", "sim.js", "1502"]
+    ports:
+      - "127.0.0.1:${SIM_PORT:-1502}:1502"
+    restart: unless-stopped
+
+  # Unit and end-to-end tests against this stack: docker compose --profile test run --rm tests
+  tests:
+    profiles: [test]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: tools
+    depends_on:
+      nodered:
+        condition: service_started
+    environment:
+      NODE_RED_URL: http://nodered:1880
+      MQTT_URL: mqtts://mosquitto:8883
+      MQTT_CA: /certs/broker.crt
+      GATEWAY_DB: /state/gateway.db
+      # Test devices and the test broker run in this container; Node-RED reaches them at its address.
+      E2E_HOST: auto
+      E2E_LISTEN: 0.0.0.0
+    volumes:
+      # Read by the reliability tests. SQLite needs write access for its WAL index even to read.
+      - nodered-state:/state
+      - ./state/docker/certs:/certs:ro
+    command: ["npm", "run", "test:all"]
+
+volumes:
+  mosquitto-data:
+  nodered-state:
