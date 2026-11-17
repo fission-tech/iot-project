@@ -1,0 +1,140 @@
+# Rolls the Node-RED gateway out to edge devices through qbee.io.
+#   called by Node-RED CI after it publishes the images of a push to feature/node-red -> staging
+#   run by hand with a published tag                                                 -> staging (how to roll back)
+# For now only staging is deployed; canary and production are commented out below until their groups exist.
+# Each GitHub environment has its own variable QBEE_GROUP_ID and secrets QBEE_EMAIL, QBEE_PASSWORD, GHCR_USERNAME
+# and GHCR_TOKEN. See nodered/deploy/README.md.
+name: Node-RED deploy
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Commit whose images were published"
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to deploy, for example sha-1a2b3c4 or v1.2.0"
+        required: true
+
+permissions:
+  contents: read
+
+# One rollout at a time; a newer one waits instead of cancelling a rollout in progress.
+concurrency:
+  group: nodered-deploy
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      ref: ${{ steps.plan.outputs.ref }}
+    steps:
+      - id: plan
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [ -n "$INPUT_REF" ]; then
+            # Called by CI: the image tag is the commit's short SHA, as docker/metadata-action writes it.
+            ref="$INPUT_REF"; tag="sha-${INPUT_REF:0:7}"
+          else
+            tag="$INPUT_TAG"
+            case "$tag" in
+              v*) ref="nodered-$tag" ;;
+              sha-*) ref="${tag#sha-}" ;;
+              *) echo "Tag must look like sha-1a2b3c4 or v1.2.0" >&2; exit 1 ;;
+            esac
+          fi
+          if [[ ! "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "Not a valid image tag: $tag" >&2; exit 1
+          fi
+          { echo "tag=$tag"; echo "ref=$ref"; } >> "$GITHUB_OUTPUT"
+          echo "Deploy $tag (from $ref) to staging"
+
+  staging:
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # The deploy script and Compose file from the version being deployed, so a rollback uses its own.
+      - name: Check out the deployed version
+        env:
+          REF: ${{ needs.plan.outputs.ref }}
+        run: git checkout --detach "$REF"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Deploy and wait for healthy devices
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+          GROUP: ${{ vars.QBEE_GROUP_ID }}
+          QBEE_EMAIL: ${{ secrets.QBEE_EMAIL }}
+          QBEE_PASSWORD: ${{ secrets.QBEE_PASSWORD }}
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+        run: node nodered/deploy/qbee-deploy.js --group "$GROUP" --tag "$TAG" --wait-minutes 20
+
+  # Canary and production: turned off until their qbee groups and GitHub environments exist. To turn them on,
+  # uncomment both jobs, add the environments with required reviewers, and decide what triggers them (for example
+  # a nodered-v* tag). Each waits for the previous environment to succeed.
+  #
+  # canary:
+  #   needs: [plan, staging]
+  #   runs-on: ubuntu-24.04
+  #   timeout-minutes: 45
+  #   environment: canary
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         fetch-depth: 0
+  #     - name: Check out the deployed version
+  #       env:
+  #         REF: ${{ needs.plan.outputs.ref }}
+  #       run: git checkout --detach "$REF"
+  #     - uses: actions/setup-node@v4
+  #       with:
+  #         node-version: 22
+  #     - name: Deploy and wait for healthy devices
+  #       env:
+  #         TAG: ${{ needs.plan.outputs.tag }}
+  #         GROUP: ${{ vars.QBEE_GROUP_ID }}
+  #         QBEE_EMAIL: ${{ secrets.QBEE_EMAIL }}
+  #         QBEE_PASSWORD: ${{ secrets.QBEE_PASSWORD }}
+  #         GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+  #         GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+  #       run: node nodered/deploy/qbee-deploy.js --group "$GROUP" --tag "$TAG" --wait-minutes 30
+  #
+  # production:
+  #   needs: [plan, canary]
+  #   runs-on: ubuntu-24.04
+  #   timeout-minutes: 90
+  #   environment: production
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         fetch-depth: 0
+  #     - name: Check out the deployed version
+  #       env:
+  #         REF: ${{ needs.plan.outputs.ref }}
+  #       run: git checkout --detach "$REF"
+  #     - uses: actions/setup-node@v4
+  #       with:
+  #         node-version: 22
+  #     - name: Deploy and wait for healthy devices
+  #       env:
+  #         TAG: ${{ needs.plan.outputs.tag }}
+  #         GROUP: ${{ vars.QBEE_GROUP_ID }}
+  #         QBEE_EMAIL: ${{ secrets.QBEE_EMAIL }}
+  #         QBEE_PASSWORD: ${{ secrets.QBEE_PASSWORD }}
+  #         GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+  #         GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+  #       run: node nodered/deploy/qbee-deploy.js --group "$GROUP" --tag "$TAG" --wait-minutes 75

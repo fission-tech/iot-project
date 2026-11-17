@@ -1,0 +1,146 @@
+# Tests the Node-RED gateway, publishes its images to GHCR and deploys them to staging through qbee.io.
+# Pull requests: unit and end-to-end tests. Pushes to feature/node-red: the same, then multi-arch images tagged
+# sha-<commit>, then nodered-deploy.yml rolls them out to the staging group. nodered-v* tags also get v<version>.
+name: Node-RED CI
+
+on:
+  pull_request:
+    paths:
+      - "nodered/**"
+      - ".github/workflows/nodered-*.yml"
+  push:
+    # The branch that deploys to staging. Change to main once the Node-RED variant is merged.
+    branches: [feature/node-red]
+    tags: ["nodered-v*"]
+    paths:
+      - "nodered/**"
+      - ".github/workflows/nodered-*.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nodered-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: nodered
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: nodered/test/package-lock.json
+
+      - name: Unit tests
+        working-directory: nodered/test
+        run: |
+          npm ci --no-audit --no-fund
+          npm test
+
+      - name: Flow converts for Docker
+        run: node docker/prepare-flows.js flows.json "$RUNNER_TEMP/flows.json"
+
+      - name: Device Compose file is valid
+        run: |
+          sed -e 's/{{IMAGE_TAG}}/ci/' -e 's/{{GATEWAY_ID}}/ci-gw/' -e 's/{{NODE_RED_PASSWORD}}/ci/' \
+              -e 's/{{NODE_RED_PORT}}/1880/' -e 's/{{MQTT_PORT}}/8883/' deploy/compose.qbee.yaml > "$RUNNER_TEMP/compose.qbee.yaml"
+          docker compose -f "$RUNNER_TEMP/compose.qbee.yaml" config --quiet
+
+      - name: Start the stack
+        run: |
+          docker compose up -d --build
+          for _ in $(seq 1 60); do
+            curl -sf http://127.0.0.1:1880/api/gateway/status > /dev/null && exit 0
+            sleep 2
+          done
+          echo "Node-RED did not answer within 2 minutes" >&2
+          exit 1
+
+      - name: End-to-end tests
+        run: docker compose --profile test run --rm tests npm run test:e2e
+
+      - name: Logs
+        if: failure()
+        run: docker compose logs --no-color --tail 300
+
+      - name: Stop the stack
+        if: always()
+        run: docker compose --profile test down -v
+
+  publish:
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - target: runtime
+            image: iot-nodered
+          - target: broker
+            image: iot-nodered-broker
+          - target: certs
+            image: iot-nodered-certs
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # sha-<7 chars> for every push; v1.2.0 for the tag nodered-v1.2.0. No "latest": devices always name a version.
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/fission-tech/${{ matrix.image }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=match,pattern=nodered-(v.*),group=1
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: nodered
+          file: nodered/docker/Dockerfile
+          target: ${{ matrix.target }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.target }}
+          cache-to: type=gha,scope=${{ matrix.target }},mode=max
+
+      # Fails the run, which stops the deploy, on a critical vulnerability that has a fix.
+      - name: Vulnerability scan
+        if: matrix.target == 'runtime'
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+  deploy-staging:
+    needs: publish
+    if: github.event_name == 'push' && github.ref == 'refs/heads/feature/node-red'
+    uses: ./.github/workflows/nodered-deploy.yml
+    with:
+      ref: ${{ github.sha }}
+    # The staging environment's secrets reach the deploy job through this.
+    secrets: inherit
