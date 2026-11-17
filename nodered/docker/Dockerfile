@@ -3,6 +3,10 @@
 
 FROM nodered/node-red:5.0.9-debian AS runtime
 USER root
+# Debian's security fixes released since the base image was built; CI fails on any critical one left unfixed.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
 # The npm modules the flow's function nodes load, in the Node-RED user directory where Node-RED looks for them.
 COPY docker/package.json /data/package.json
 RUN cd /data && npm install --omit=dev --no-audit --no-fund && npm cache clean --force
