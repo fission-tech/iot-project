@@ -16,3 +16,6 @@ logs/
 .env
 grafana/generated/
 node_modules/
+
+# qbee bootstrap key for the staging VMs; registers devices to the qbee account.
+nodered/deploy/vm/bootstrap-key.txt
