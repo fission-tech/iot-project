@@ -1,0 +1,48 @@
+# The Node-RED gateway on an edge device, deployed by qbee.io as a Docker Compose project.
+# qbee fills in each template parameter (a key in double braces) before running it; see deploy/README.md.
+# Unlike ../compose.yaml, nothing is built here: the images come from GHCR, and the certificate is a volume.
+services:
+  # Creates the broker certificate on the first start, then exits. Later starts keep it.
+  certs:
+    image: ghcr.io/fission-tech/iot-nodered-certs:{{IMAGE_TAG}}
+    volumes:
+      - certs:/certs
+    restart: "no"
+
+  mosquitto:
+    image: ghcr.io/fission-tech/iot-nodered-broker:{{IMAGE_TAG}}
+    depends_on:
+      certs:
+        condition: service_completed_successfully
+    # Only this device can connect; reach it remotely through qbee-connect or qbee-cli.
+    ports:
+      - "127.0.0.1:{{MQTT_PORT}}:8883"
+    volumes:
+      - certs:/mosquitto/certs:ro
+      - mosquitto-data:/mosquitto/data
+    restart: unless-stopped
+
+  nodered:
+    image: ghcr.io/fission-tech/iot-nodered:{{IMAGE_TAG}}
+    depends_on:
+      certs:
+        condition: service_completed_successfully
+      mosquitto:
+        condition: service_started
+    environment:
+      GATEWAY_ID: "{{GATEWAY_ID}}"
+      NODE_RED_PASSWORD: "{{NODE_RED_PASSWORD}}"
+    ports:
+      - "127.0.0.1:{{NODE_RED_PORT}}:1880"
+    volumes:
+      - nodered-state:/data/state
+      - certs:/certs:ro
+    # Modbus devices on the device's own network are reached by their address, as usual.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  certs:
+  mosquitto-data:
+  nodered-state:

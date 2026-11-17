@@ -2,8 +2,8 @@
 
 Two suites check `nodered/flows.json`:
 
-- **Unit** (44 tests, under a second): runs the flow's Function node code straight from `flows.json`, with fake flow/context stores and a controllable clock. It needs no Node-RED, broker or Modbus device.
-- **End to end** (21 tests, about 2–3 minutes): drives a running Node-RED through its registry API, serves Modbus from built-in test servers, and reads the results from the MQTT broker. The reliability tests point the gateway at an in-process test broker (`aedes`) that they stop and start.
+- **Unit** (52 tests, about a second): runs the flow's Function node code straight from `flows.json`, with fake flow/context stores and a controllable clock, and checks the qbee deploy script against a fake qbee API. It needs no Node-RED, broker, Modbus device or qbee account.
+- **End to end** (22 tests, about 2–3 minutes): drives a running Node-RED through its registry API, serves Modbus from built-in test servers, and reads the results from the MQTT broker. The reliability tests point the gateway at an in-process test broker (`aedes`) that they stop and start.
 
 ## Run
 
@@ -75,6 +75,16 @@ They restore `local` and the gateway's own broker setting afterwards. Stop the .
 | Responses | 200/201/404/409/500 mapping, and a 400 passes through unchanged |
 | Snapshot | Rows become devices. The version stays the same for the same content and changes when content changes. A corrupt row is skipped with a warning. |
 | Reload | Only successful writes tell the poller to reload |
+
+### Unit: `unit/qbee-deploy.test.js` (`deploy/qbee-deploy.js`)
+
+| Area | Checked |
+| --- | --- |
+| Commit | Sets the image tag, the versioned Compose file and the GHCR login. Points the other parameters to qbee parameters. Sets every template parameter used in `compose.qbee.yaml`. |
+| Devices | Found at any depth below the group |
+| Ready | Only when the Node-RED container runs the new tag and reports `healthy` |
+| Full run against a fake qbee API | Login, then upload, commit, device list and check-in, in that order. A failed check-in trigger is only logged. Waits until the device runs the new tag. |
+| Failures | A device that never gets ready fails with its state. A wrong password stops before anything changes. A dry run calls nothing and hides the registry password. |
 
 ### End to end: `e2e/registry-api.test.js`
 

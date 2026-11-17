@@ -41,6 +41,7 @@ COPY test/package.json test/package-lock.json ./
 RUN npm ci --no-audit --no-fund && npm cache clean --force
 COPY test/ ./
 COPY flows.json /app/flows.json
+COPY deploy/ /app/deploy/
 RUN chown -R node-red:node-red /app
 USER node-red
 ENTRYPOINT []
