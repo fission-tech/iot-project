@@ -70,7 +70,9 @@ function client(base, token) {
             headers["Content-Type"] = "application/json";
             options.body = JSON.stringify(body);
         }
-        const response = await fetch(base + url, options);
+        const response = await fetch(base + url, options).catch(error => {
+            throw new Error(method + " " + url + " failed: " + (error.cause?.message || error.message));
+        });
         const text = await response.text();
         if (!response.ok) throw new Error(method + " " + url + " failed: " + response.status + " " + text.slice(0, 300));
         return text ? JSON.parse(text) : null;
@@ -180,6 +182,8 @@ if (require.main === module) {
     }
     deploy(options).catch(error => {
         console.error(error.message);
+        // In GitHub Actions, also an annotation: it shows on the run's summary, which needs no sign-in to read.
+        if (process.env.GITHUB_ACTIONS) console.log("::error title=qbee deploy failed::" + error.message.replace(/\r?\n/g, " "));
         process.exit(1);
     });
 }
