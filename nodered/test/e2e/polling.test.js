@@ -103,11 +103,12 @@ test("a unit that rejects the address answered: failing with bad values, never o
     const reading = await bus.waitFor("u5", p => p.state === "failing", { since });
     assert.equal(reading.metrics.Level.quality, "Bad");
     assert.match(reading.metrics.Level.error, /exception 2|illegal/i);
-    await sleep(4000);
+    // Past the 3 polls that would make an unanswered device offline. Waits for the readings rather than a fixed
+    // time, so a slow start (such as just after Node-RED boots) doesn't fail it.
+    await until(() => bus.forDevice("u5", since).length >= 4, { what: "4 readings while failing" });
     const status = await deviceStatus("u5");
     assert.equal(status.state, "failing");
     assert.equal(status.failures, 0, "an exception reply is an answer");
-    assert.ok(bus.forDevice("u5", since).length >= 4, "keeps publishing while failing");
     await api("DELETE", "/e2e-u5");
 });
 
