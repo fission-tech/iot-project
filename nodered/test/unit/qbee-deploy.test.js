@@ -63,6 +63,9 @@ function fakeQbee() {
             if (req.url === "/api/v2/file") return reply(200, {});
             if (req.url === "/api/v2/commit") return reply(200, { sha: "c0ffee" });
             if (req.url === "/api/v2/grouptree/grp-1") return reply(200, { type: "group", nodes: [{ type: "device", node_id: "d1" }] });
+            if (req.url === "/api/v2/grouptree") return reply(200, { tree: { type: "group", node_id: "root", title: "All devices", nodes: [
+                { type: "group", node_id: "grp-1", title: "nodered-staging", nodes: [{ type: "device", node_id: "d1", title: "vm" }] }] } });
+            if (req.url.startsWith("/api/v2/grouptree/")) return reply(404, { error: { code: 404, message: "node not found" } });
             if (req.url === "/api/v2/device/d1/run-agent") return reply(403, { error: "no remote access" });
             if (req.url === "/api/v2/inventoryreport/docker/d1") {
                 polls++;
@@ -86,13 +89,13 @@ test("deploy logs in, uploads the file, commits, and waits until the device runs
     const result = await deploy(options(qbee.api), line => log.push(line));
     assert.deepEqual(result.devices, ["d1"]);
     const urls = qbee.requests.map(r => r.method + " " + r.url);
-    assert.deepEqual(urls.slice(0, 5), ["POST /api/v2/login", "POST /api/v2/file", "POST /api/v2/commit",
-        "GET /api/v2/grouptree/grp-1", "GET /api/v2/device/d1/run-agent"]);
-    const upload = qbee.requests[1];
+    assert.deepEqual(urls.slice(0, 5), ["POST /api/v2/login", "GET /api/v2/grouptree/grp-1", "POST /api/v2/file",
+        "POST /api/v2/commit", "GET /api/v2/device/d1/run-agent"]);
+    const upload = qbee.requests[2];
     assert.match(upload.type, /^multipart\/form-data/);
     assert.match(upload.body, /filename="compose-v2.yaml"/);
     assert.match(upload.body, /image: ghcr\.io\/fission-tech\/iot-nodered:\{\{IMAGE_TAG\}\}/);
-    assert.equal(JSON.parse(qbee.requests[2].body).changes[0].config.items[0].parameters[0].value, "v2");
+    assert.equal(JSON.parse(qbee.requests[3].body).changes[0].config.items[0].parameters[0].value, "v2");
     assert.ok(log.some(line => /Could not trigger d1/.test(line)), "a failed check-in trigger is only logged");
     assert.ok(log.some(line => /runs .*:v1/.test(line)));
     assert.match(log.at(-1), /All 1 device\(s\) run v2/);
@@ -103,6 +106,14 @@ test("deploy fails with the device's state when it never becomes ready", async t
     t.after(() => qbee.server.close());
     await assert.rejects(deploy({ ...options(qbee.api), tag: "v3", waitMinutes: 0.002 }, () => {}),
         /Timed out .*d1 \(runs .*:v2\)/);
+});
+
+test("an unknown group stops before anything is changed and lists the group IDs", async t => {
+    const qbee = await fakeQbee();
+    t.after(() => qbee.server.close());
+    await assert.rejects(deploy({ ...options(qbee.api), group: "nodered-staging" }, () => {}),
+        /group "nodered-staging" not found .*404.*Group IDs: All devices = root, nodered-staging = grp-1$/);
+    assert.deepEqual(qbee.requests.map(r => r.url), ["/api/v2/login", "/api/v2/grouptree/nodered-staging", "/api/v2/grouptree"]);
 });
 
 test("a wrong password stops before anything is changed", async t => {

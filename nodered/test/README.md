@@ -2,7 +2,7 @@
 
 Two suites check `nodered/flows.json`:
 
-- **Unit** (52 tests, about a second): runs the flow's Function node code straight from `flows.json`, with fake flow/context stores and a controllable clock, and checks the qbee deploy script against a fake qbee API. It needs no Node-RED, broker, Modbus device or qbee account.
+- **Unit** (53 tests, about a second): runs the flow's Function node code straight from `flows.json`, with fake flow/context stores and a controllable clock, and checks the qbee deploy script against a fake qbee API. It needs no Node-RED, broker, Modbus device or qbee account.
 - **End to end** (22 tests, about 2–3 minutes): drives a running Node-RED through its registry API, serves Modbus from built-in test servers, and reads the results from the MQTT broker. The reliability tests point the gateway at an in-process test broker (`aedes`) that they stop and start.
 
 ## Run
@@ -84,7 +84,7 @@ They restore `local` and the gateway's own broker setting afterwards. Stop the .
 | Devices | Found at any depth below the group |
 | Ready | Only when the Node-RED container runs the new tag and reports `healthy` |
 | Full run against a fake qbee API | Login, then upload, commit, device list and check-in, in that order. A failed check-in trigger is only logged. Waits until the device runs the new tag. |
-| Failures | A device that never gets ready fails with its state. A wrong password stops before anything changes. A dry run calls nothing and hides the registry password. |
+| Failures | A device that never gets ready fails with its state. An unknown group or a wrong password stops before anything changes, and an unknown group lists the IDs that exist. A dry run calls nothing and hides the registry password. |
 
 ### End to end: `e2e/registry-api.test.js`
 

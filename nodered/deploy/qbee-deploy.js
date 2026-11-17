@@ -51,6 +51,13 @@ function findDevices(node) {
     return (node.nodes || []).flatMap(findDevices);
 }
 
+// "Title = node_id" for every group in a tree from GET /api/v2/grouptree, for error messages.
+function listGroups(node) {
+    if (!node || node.type === "device") return [];
+    const own = node.node_id ? [(node.title ? node.title + " = " : "") + node.node_id] : [];
+    return own.concat((node.nodes || []).flatMap(listGroups));
+}
+
 // A device is done when its Node-RED container runs the new image and its health check passes.
 function deviceState(report, tag) {
     const containers = report?.docker_containers?.items || [];
@@ -91,6 +98,15 @@ async function deploy(options, log = console.log) {
     if (!token) throw new Error("qbee login returned no token");
     const call = client(api, token);
 
+    // Check the group first, so a wrong ID changes nothing and the error lists the IDs that would work.
+    const groupNode = await call("GET", "/api/v2/grouptree/" + encodeURIComponent(group)).catch(async error => {
+        const tree = await call("GET", "/api/v2/grouptree").catch(() => null);
+        const groups = listGroups(tree?.tree || tree?.root || tree);
+        throw new Error("qbee group " + JSON.stringify(group) + " not found (" + error.message + "). " +
+            (groups.length ? "Group IDs: " + groups.join(", ") : "Could not list the groups."));
+    });
+    const devices = findDevices(groupNode);
+
     const form = new FormData();
     form.append("path", FILE_DIR);
     form.append("replace", "true");
@@ -101,7 +117,6 @@ async function deploy(options, log = console.log) {
     const committed = await call("POST", "/api/v2/commit", commit);
     log("Committed " + (committed?.sha || "(no sha)") + ": " + commit.message + " to group " + group);
 
-    const devices = findDevices(await call("GET", "/api/v2/grouptree/" + encodeURIComponent(group)));
     if (devices.length === 0) {
         log("The group has no devices; nothing to wait for.");
         return { devices };
@@ -188,4 +203,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { buildCommit, findDevices, deviceState, deploy, composeFileName };
+module.exports = { buildCommit, findDevices, listGroups, deviceState, deploy, composeFileName };
