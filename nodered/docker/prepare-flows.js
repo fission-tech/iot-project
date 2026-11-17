@@ -8,12 +8,10 @@ const containerEnv = {
     tab_modbus_mqtt: {
         GATEWAY_DB: "/data/state/gateway.db",
         GATEWAY_STATE_DIR: "/data/state",
-        MQTT_HOST: "mosquitto",
         MQTT_CA: "/certs/broker.crt"
     },
     f937eaa01d565cc0: {
         REGISTRY_DB: "/data/state/registry.db",
-        SEED_BROKER_HOST: "mosquitto",
         SEED_BROKER_CERTIFICATE: "/certs/broker.crt"
     }
 };
@@ -26,6 +24,22 @@ for (const [tabId, values] of Object.entries(containerEnv)) {
         entry.value = value;
     }
 }
+// Set per device when the container starts. A tab variable of type "env" named after itself reads the
+// process environment; the Dockerfile gives each one a default.
+const fromEnvironment = {
+    tab_modbus_mqtt: ["GATEWAY_ID", "BROKER_ID", "MQTT_HOST", "MQTT_PORT"],
+    f937eaa01d565cc0: ["SEED_BROKER_HOST"]
+};
+for (const [tabId, names] of Object.entries(fromEnvironment)) {
+    const tab = flows.find(node => node.id === tabId && node.type === "tab");
+    for (const name of names) {
+        const entry = tab.env?.find(item => item.name === name);
+        if (!entry) throw new Error("Environment variable " + name + " not found on tab " + tab.label);
+        entry.type = "env";
+        entry.value = name;
+    }
+}
+
 const registryDb = flows.find(node => node.type === "sqlitedb");
 if (!registryDb) throw new Error("Device Registry DB config node not found");
 registryDb.db = "/data/state/registry.db";

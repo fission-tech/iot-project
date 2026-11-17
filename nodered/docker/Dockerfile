@@ -1,4 +1,5 @@
-# Build context: the nodered/ folder. Targets: runtime (Node-RED), certs (one-shot certificate), tools (test server and tests).
+# Build context: the nodered/ folder. Targets: runtime (Node-RED), broker (Mosquitto with its configuration),
+# certs (one-shot certificate), tools (test server and tests).
 
 FROM nodered/node-red:5.0.9-debian AS runtime
 USER root
@@ -12,9 +13,19 @@ RUN node /tmp/build/prepare-flows.js /tmp/build/flows.json /data/flows.json \
     && mkdir -p /data/state \
     && chown -R node-red:node-red /data
 USER node-red
+# Read by the flow at startup; set them per device. MQTT_* is the broker used until the registry names one;
+# SEED_BROKER_HOST is the host of the registry's "local" broker when the registry is first created.
+ENV GATEWAY_ID=nodered-gateway-01 \
+    BROKER_ID=local \
+    MQTT_HOST=mosquitto \
+    MQTT_PORT=8883 \
+    SEED_BROKER_HOST=mosquitto
 # Databases and the certificate cache; mounted as a volume so they survive rebuilds.
 VOLUME /data/state
 EXPOSE 1880
+
+FROM eclipse-mosquitto:2.1.2-alpine AS broker
+COPY docker/mosquitto.conf /mosquitto/config/mosquitto.conf
 
 FROM alpine:3.20 AS certs
 RUN apk add --no-cache openssl

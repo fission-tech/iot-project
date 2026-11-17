@@ -29,7 +29,7 @@ If these ports are taken, set others before starting, for example `NODE_RED_PORT
 | Service | Image | Does |
 | --- | --- | --- |
 | `certs` | `alpine:3.20` + OpenSSL | Creates the broker's self-signed certificate on the first start, then exits. Later starts keep it. |
-| `mosquitto` | `eclipse-mosquitto:2.1.2-alpine` | The MQTT broker, with the project's `broker/mosquitto-docker.conf` (TLS on 8883, persistent queue) |
+| `mosquitto` | `eclipse-mosquitto:2.1.2-alpine` plus [docker/mosquitto.conf](docker/mosquitto.conf) | The MQTT broker (TLS on 8883, persistent queue). Its configuration is built into the image, so the `nodered` folder needs nothing from the rest of the repository. |
 | `nodered` | `nodered/node-red:5.0.9-debian` plus this flow | The registry, poller and gateway. The npm modules the flow loads (`mqtt`, `sqlite3`, `modbus-serial`, `node-red-node-sqlite`) are installed in the image, and nothing is installed at runtime. |
 | `modbus-sim` (optional) | Test tools image | The test Modbus server: `docker compose --profile sim up -d` |
 | `tests` (optional) | Test tools image | The unit and end-to-end tests against this stack: `docker compose --profile test run --rm tests` |
@@ -64,6 +64,18 @@ The image is built from the repository's `flows.json`. `docker/prepare-flows.js`
 
 The build fails if any Windows path is left in the flow.
 
+These are read from the container's environment when it starts, so each gateway can set its own without rebuilding:
+
+| Variable | Default | Used for |
+| --- | --- | --- |
+| `GATEWAY_ID` | `nodered-gateway-01` | The gateway's identity, its status topic `iot/gateway/<id>/status`, and its broker assignment in the registry |
+| `BROKER_ID` | `local` | The registry broker used when the gateway has no assignment |
+| `MQTT_HOST`, `MQTT_PORT` | `mosquitto`, `8883` | The broker used until the registry names one |
+| `SEED_BROKER_HOST` | `mosquitto` | Host of the `local` broker written when the registry is first created |
+| `NODE_RED_PASSWORD` | not set | When set, logins are required for the editor, `/register` and the API, as user `NODE_RED_USER` (default `admin`). Leave it unset locally; the tests expect no login. |
+
+To deploy to edge devices with qbee.io, see [deploy/README.md](deploy/README.md).
+
 The image is the source of truth for the flow. A change deployed from the editor inside Docker lasts until the container is recreated, for example by `up --build`. To keep such a change, export the flow (**Menu → Export**), merge it into `nodered/flows.json`, and rebuild. Changes made in the repository take effect with `docker compose up -d --build`.
 
 ## Tests in Docker
@@ -84,4 +96,8 @@ This is a proof-of-concept setup:
 - The broker allows anonymous clients.
 - Both are published on `127.0.0.1` only, so other machines can't reach them.
 
-Before exposing either, add Node-RED `adminAuth` and `httpNodeAuth` in `docker/settings.js`, and broker authentication in its configuration.
+Before exposing either:
+- **Node-RED:** set `NODE_RED_PASSWORD`, which turns on logins for the editor, `/register` and the API.
+- **The broker:** add authentication to its configuration.
+
+The qbee deployment does the first. The broker there still allows anonymous clients, but only on the device itself.

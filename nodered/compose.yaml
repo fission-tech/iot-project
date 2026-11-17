@@ -14,17 +14,16 @@ services:
     restart: "no"
 
   mosquitto:
-    image: eclipse-mosquitto:2.1.2-alpine
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: broker
     depends_on:
       certs:
         condition: service_completed_successfully
     ports:
       - "127.0.0.1:${MQTT_PORT:-8883}:8883"
     volumes:
-      - type: bind
-        source: ../broker/mosquitto-docker.conf
-        target: /mosquitto/config/mosquitto.conf
-        read_only: true
       - ./state/docker/certs:/mosquitto/certs:ro
       - mosquitto-data:/mosquitto/data
     restart: unless-stopped
