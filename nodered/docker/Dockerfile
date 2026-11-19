@@ -1,5 +1,5 @@
 # Build context: the nodered/ folder. Targets: runtime (Node-RED), broker (Mosquitto with its configuration),
-# certs (one-shot certificate), tools (test server and tests).
+# certs (one-shot certificate), sim (simulated plant for staging devices), tools (test server and tests).
 
 FROM nodered/node-red:5.0.9-debian AS runtime
 USER root
@@ -36,6 +36,17 @@ RUN apk add --no-cache openssl
 COPY docker/make-certs.sh /make-certs.sh
 RUN sed -i 's/\r$//' /make-certs.sh
 ENTRYPOINT ["sh", "/make-certs.sh"]
+
+# Simulated plant for staging devices (deploy/simulator): the Modbus server, and seed.js to register it. Node only.
+FROM node:22-alpine3.22 AS sim
+WORKDIR /app
+COPY test/helpers/modbus-sim.js /app/test/helpers/
+COPY deploy/simulator/ /app/deploy/simulator/
+WORKDIR /app/deploy/simulator
+USER node
+ENV E2E_LISTEN=0.0.0.0
+EXPOSE 1502
+CMD ["node", "simulator.js", "1502"]
 
 FROM nodered/node-red:5.0.9-debian AS tools
 USER root

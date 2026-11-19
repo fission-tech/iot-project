@@ -4,7 +4,8 @@
 // Unknown unit IDs also get exception 0x0B, like a TCP-to-RTU gateway.
 const net = require("net");
 
-function createSim({ port, units, onRequest = () => {} }) {
+// record: false keeps no request history, for a simulator that runs for days.
+function createSim({ port, units, onRequest = () => {}, record = true }) {
     const sockets = new Set();
     const requests = [];
     let totalConnections = 0;
@@ -16,7 +17,7 @@ function createSim({ port, units, onRequest = () => {} }) {
         const unit = units[uid];
         const entry = { at: Date.now(), uid, fc, address, quantity,
             outcome: unit === "silent" ? "no reply" : unit === "illegal" ? "exception 2" : !unit || unit === "exception" ? "exception 11" : "ok" };
-        requests.push(entry);
+        if (record) requests.push(entry);
         onRequest(entry);
         if (unit === "silent") return null;
         let pdu;
