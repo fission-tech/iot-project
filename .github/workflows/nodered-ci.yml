@@ -1,5 +1,5 @@
 # Tests the Node-RED gateway, publishes its images to GHCR and deploys them to staging through qbee.io.
-# Pull requests: unit and end-to-end tests. Pushes to feature/node-red: the same, then multi-arch images tagged
+# Pull requests: unit and end-to-end tests. Pushes to test/qbee-ilyaan-setup: the same, then multi-arch images tagged
 # sha-<commit>, then nodered-deploy.yml rolls them out to the staging group. nodered-v* tags also get v<version>.
 name: Node-RED CI
 
@@ -9,8 +9,8 @@ on:
       - "nodered/**"
       - ".github/workflows/nodered-*.yml"
   push:
-    # The branch that deploys to staging. Change to main once the Node-RED variant is merged.
-    branches: [feature/node-red]
+    # Ilyaan's branch deploys to his own qbee group.
+    branches: [test/qbee-ilyaan-setup]
     tags: ["nodered-v*"]
     paths:
       - "nodered/**"
@@ -142,9 +142,9 @@ jobs:
 
   deploy-staging:
     needs: publish
-    if: github.event_name == 'push' && github.ref == 'refs/heads/feature/node-red'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/test/qbee-ilyaan-setup'
     uses: ./.github/workflows/nodered-deploy.yml
     with:
       ref: ${{ github.sha }}
-    # The staging environment's secrets reach the deploy job through this.
+    # Pass repository secrets to the deploy job.
     secrets: inherit
