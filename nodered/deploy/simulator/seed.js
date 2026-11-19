@@ -30,12 +30,15 @@ function plantDevices({ gateway, host, port }) {
     ];
 }
 
+// Basic auth for the gateway's API when it has a password; simulator.js reads the registry with the same login.
+function authHeaders(env) {
+    if (!env.NODE_RED_PASSWORD) return {};
+    return { Authorization: "Basic " + Buffer.from((env.NODE_RED_USER || "admin") + ":" + env.NODE_RED_PASSWORD).toString("base64") };
+}
+
 async function seed(env = process.env, log = console.log, { attempts = 30, delayMs = 2000 } = {}) {
     const url = (env.NODE_RED_URL || "http://nodered:1880") + "/api/devices";
-    const headers = { "Content-Type": "application/json" };
-    if (env.NODE_RED_PASSWORD) {
-        headers.Authorization = "Basic " + Buffer.from((env.NODE_RED_USER || "admin") + ":" + env.NODE_RED_PASSWORD).toString("base64");
-    }
+    const headers = { "Content-Type": "application/json", ...authHeaders(env) };
     const devices = plantDevices({ gateway: gatewayId(env), host: env.SIM_HOST || "modbus-sim", port: Number(env.SIM_PORT || 1502) });
 
     for (const device of devices) {
@@ -60,4 +63,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { seed, plantDevices, gatewayId };
+module.exports = { seed, plantDevices, gatewayId, authHeaders };

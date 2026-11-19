@@ -170,6 +170,13 @@ docker exec iot-nodered-mosquitto-1 sh -c 'mosquitto_sub -h localhost -p 8883 --
 
 For gateway 2, use `iot-nodered-2-mosquitto-1`. Without `--simulator`, both containers are defined but not started.
 
+**Adding your own simulated devices.** The simulator reads the gateway's registry every 15 seconds and answers as every enabled device registered at host `modbus-sim`, port `1502`. To add one, open the gateway's `/register` page (through the qbee tunnel) and register a device with:
+- host `modbus-sim`, port `1502`;
+- any unit ID from 3 to 247 that no other simulated device uses (1 and 2 are the pump and tank);
+- any metrics: any register area, address, data type, scale and word order.
+
+Within about 15 seconds the device goes online. Each metric gets its own value, which rises and falls between about 10 and 90 (after scale) over 2 to 10 minutes; a bool is on while its value is above 30. A value that doesn't fit the data type at that scale is clamped to the type's limit. Disabling or deleting the device makes the simulator stop answering as it, and an unregistered unit ID gets Modbus exception 11, like a missing device behind a gateway.
+
 ## The qbee API calls used
 
 The full reference is at https://www.app.qbee.io/api/v2.

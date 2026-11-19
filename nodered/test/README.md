@@ -2,7 +2,7 @@
 
 Two suites check `nodered/flows.json`:
 
-- **Unit** (60 tests, about a second): runs the flow's Function node code straight from `flows.json`, with fake flow/context stores and a controllable clock, and checks the qbee deploy script against a fake qbee API and the staging simulator against a fake registry API. It needs no Node-RED, broker, Modbus device or qbee account.
+- **Unit** (62 tests, about a second): runs the flow's Function node code straight from `flows.json`, with fake flow/context stores and a controllable clock, and checks the qbee deploy script against a fake qbee API and the staging simulator against a fake registry API. It needs no Node-RED, broker, Modbus device or qbee account.
 - **End to end** (22 tests, about 2–3 minutes): drives a running Node-RED through its registry API, serves Modbus from built-in test servers, and reads the results from the MQTT broker. The reliability tests point the gateway at an in-process test broker (`aedes`) that they stop and start.
 
 ## Run
@@ -93,6 +93,7 @@ They restore `local` and the gateway's own broker setting afterwards. Stop the .
 | --- | --- |
 | Plant | The pump stops for the last minute in ten, with zero flow. The tank goes from 20 to 90 % and back in 30 minutes. Values stay in range for an hour. |
 | Devices | The simulated pump and tank pass the registry's own validation |
+| Registered devices | Every data type and word order encodes so the gateway's own decoder reads the value back; values that don't fit are clamped. The simulator answers only as enabled devices at its host and port, keeps the pump and tank, and moves each metric on its own. |
 | Gateway ID | Gateway n > 1 gets `-n` appended, like `settings.js` |
 | Seeding | Retries while Node-RED is starting, logs in, leaves existing devices alone, and stops at once on a wrong password |
 

@@ -1,9 +1,9 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const http = require("node:http");
-const { plantAt } = require("../../deploy/simulator/simulator");
+const { plantAt, signalAt, encode, unitsFor } = require("../../deploy/simulator/simulator");
 const { seed, plantDevices, gatewayId } = require("../../deploy/simulator/seed");
-const { run } = require("../helpers/flow-functions");
+const { run, store } = require("../helpers/flow-functions");
 
 const VALIDATE = "c22d6d9f13e4c097";
 const minute = 60000;
@@ -21,6 +21,57 @@ test("the simulated pump runs 9 minutes in 10 and the tank fills and empties bet
         assert.ok(plant.temperature > 15 && plant.temperature < 30, "temperature fits int16 x10");
         assert.ok(plant.level >= 20 && plant.level <= 90);
     }
+});
+
+// Decodes words with the gateway's own decoder, as one poll of a one-metric device.
+function decodeWithGateway(m, words) {
+    const flow = store();
+    const global = store();
+    const device = { id: "d1", deviceId: "d1", host: "modbus-sim", port: 1502, unitId: 3, pollIntervalSeconds: 2, enabled: true, metrics: [m] };
+    run("registry_scheduler", { _kind: "config", payload: { version: 1, devices: [device] } }, { flow, global, now: 0 });
+    const [reads] = run("registry_scheduler", { _kind: "tick" }, { flow, global, now: 0 }).result;
+    const [telemetry] = run("scale_and_format", { _iotTask: reads[0]._iotTask, payload: { data: words } }, { flow, global }).result;
+    return telemetry.payload.metrics[m.name].value;
+}
+
+test("registered values encode so the gateway decodes them back, for every type and word order", () => {
+    const m = (dataType, extra = {}) => ({ name: "v", register: "holding", address: 4, dataType, wordOrder: null, scale: 1, unit: "", ...extra });
+    assert.equal(decodeWithGateway(m("int16", { scale: 0.1 }), [encode(m("int16", { scale: 0.1 }), 42.3)]), 42.3);
+    assert.equal(decodeWithGateway(m("uint16"), [encode(m("uint16"), 77.4)]), 77);
+    for (const wordOrder of ["big", "little"]) {
+        for (const dataType of ["int32", "uint32"]) {
+            const metric = m(dataType, { wordOrder, scale: 0.01 });
+            assert.equal(decodeWithGateway(metric, encode(metric, 63.25)), 63.25, dataType + " " + wordOrder);
+        }
+        const metric = m("float32", { wordOrder });
+        assert.ok(Math.abs(decodeWithGateway(metric, encode(metric, 12.5)) - 12.5) < 1e-6, "float32 " + wordOrder);
+    }
+    // A value that does not fit the type is clamped instead of wrapping around.
+    assert.equal(decodeWithGateway(m("int16", { scale: 0.001 }), [encode(m("int16", { scale: 0.001 }), 90)]), 32.767);
+    assert.equal(encode({ dataType: "bool" }, 80), 1);
+    assert.equal(encode({ dataType: "bool" }, 10), 0);
+});
+
+test("the simulator answers as each registered device at its address, and keeps the pump and tank", () => {
+    const metric = (name, register, address, dataType) => ({ name, register, address, dataType, wordOrder: null, scale: 1, unit: "" });
+    const devices = [
+        { deviceId: "fan", host: "Modbus-Sim", port: 1502, unitId: 5, enabled: true,
+            metrics: [metric("Speed", "holding", 10, "uint16"), metric("Power", "input", 0, "float32"), metric("On", "coil", 3, "bool")] },
+        { deviceId: "off", host: "modbus-sim", port: 1502, unitId: 6, enabled: false, metrics: [metric("x", "holding", 0, "int16")] },
+        { deviceId: "plc", host: "192.168.1.50", port: 1502, unitId: 7, enabled: true, metrics: [metric("x", "holding", 0, "int16")] },
+        { deviceId: "port", host: "modbus-sim", port: 502, unitId: 8, enabled: true, metrics: [metric("x", "holding", 0, "int16")] }
+    ];
+    const units = unitsFor(devices, 3 * minute, { hosts: ["modbus-sim"], port: 1502 });
+    assert.deepEqual(Object.keys(units), ["1", "2", "5"]);
+    assert.equal(units[5].holding[10], Math.round(signalAt("fan/Speed", 3 * minute)));
+    assert.ok(units[5].input[0] !== undefined && units[5].input[1] !== undefined, "float32 fills two registers");
+    assert.ok(units[5].coils[3] === 0 || units[5].coils[3] === 1);
+    assert.equal(units[1].holding[0], Math.round(plantAt(3 * minute).temperature * 10));
+    for (let t = 0; t < 30 * minute; t += 11000) {
+        const value = signalAt("fan/Speed", t);
+        assert.ok(value >= 10 && value <= 90);
+    }
+    assert.notEqual(signalAt("fan/Speed", minute), signalAt("fan/Power", minute), "each metric moves on its own");
 });
 
 test("the simulated devices pass the registry's own validation", () => {

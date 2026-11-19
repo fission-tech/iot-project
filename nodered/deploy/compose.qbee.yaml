@@ -47,10 +47,13 @@ services:
 
   # Simulated plant for staging devices, which have no Modbus devices of their own. SIM_REPLICAS is 1 with
   # qbee-deploy.js --simulator and 0 otherwise, so a real device runs neither of these.
+  # It reads Node-RED's registry and answers as every device registered at host modbus-sim, port 1502.
   modbus-sim:
     image: ghcr.io/fission-tech/iot-nodered-sim:{{IMAGE_TAG}}
     deploy:
       replicas: {{SIM_REPLICAS}}
+    environment:
+      NODE_RED_PASSWORD: "{{NODE_RED_PASSWORD}}"
     restart: unless-stopped
 
   # Registers the simulated pump and tank with Node-RED once, then exits. Devices that exist are left alone.
