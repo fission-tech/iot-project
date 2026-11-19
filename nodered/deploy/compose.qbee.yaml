@@ -1,6 +1,8 @@
 # The Node-RED gateway on an edge device, deployed by qbee.io as a Docker Compose project.
 # qbee fills in each template parameter (a key in double braces) before running it; see deploy/README.md.
 # Unlike ../compose.yaml, nothing is built here: the images come from GHCR, and the certificate is a volume.
+# qbee-deploy.js --instances runs this file several times on one device, as projects iot-nodered, iot-nodered-2, ...
+# Each has its own broker, state and ports; GATEWAY_INSTANCE appends its number to GATEWAY_ID.
 services:
   # Creates the broker certificate on the first start, then exits. Later starts keep it.
   certs:
@@ -31,6 +33,7 @@ services:
         condition: service_started
     environment:
       GATEWAY_ID: "{{GATEWAY_ID}}"
+      GATEWAY_INSTANCE: "{{GATEWAY_INSTANCE}}"
       NODE_RED_PASSWORD: "{{NODE_RED_PASSWORD}}"
     ports:
       - "127.0.0.1:{{NODE_RED_PORT}}:1880"
@@ -41,6 +44,29 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
+
+  # Simulated plant for staging devices, which have no Modbus devices of their own. SIM_REPLICAS is 1 with
+  # qbee-deploy.js --simulator and 0 otherwise, so a real device runs neither of these.
+  modbus-sim:
+    image: ghcr.io/fission-tech/iot-nodered-sim:{{IMAGE_TAG}}
+    deploy:
+      replicas: {{SIM_REPLICAS}}
+    restart: unless-stopped
+
+  # Registers the simulated pump and tank with Node-RED once, then exits. Devices that exist are left alone.
+  sim-seed:
+    image: ghcr.io/fission-tech/iot-nodered-sim:{{IMAGE_TAG}}
+    command: ["node", "seed.js"]
+    deploy:
+      replicas: {{SIM_REPLICAS}}
+    depends_on:
+      nodered:
+        condition: service_healthy
+    environment:
+      GATEWAY_ID: "{{GATEWAY_ID}}"
+      GATEWAY_INSTANCE: "{{GATEWAY_INSTANCE}}"
+      NODE_RED_PASSWORD: "{{NODE_RED_PASSWORD}}"
+    restart: "no"
 
 volumes:
   certs:

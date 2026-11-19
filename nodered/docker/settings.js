@@ -2,6 +2,11 @@
 // environment variables, set for the container by prepare-flows.js at build time and the Dockerfile's ENV.
 const crypto = require("crypto");
 
+// Extra gateways on one device (qbee-deploy.js --instances) get their number appended to GATEWAY_ID.
+// deploy/simulator/seed.js applies the same rule.
+const instance = Number(process.env.GATEWAY_INSTANCE || 1);
+if (instance > 1) process.env.GATEWAY_ID = (process.env.GATEWAY_ID || "nodered-gateway-01") + "-" + instance;
+
 // Logins are on when NODE_RED_PASSWORD is set (on devices), and off otherwise (local runs and the tests).
 // One account, NODE_RED_USER (default "admin"), opens both the editor and the registry page and API.
 const user = process.env.NODE_RED_USER || "admin";

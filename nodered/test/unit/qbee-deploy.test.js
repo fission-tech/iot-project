@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const http = require("node:http");
-const { buildCommit, findDevices, deviceState, deploy } = require("../../deploy/qbee-deploy");
+const { buildCommit, findDevices, deviceState, deploy, projectName } = require("../../deploy/qbee-deploy");
 
 const IMAGE = "ghcr.io/fission-tech/iot-nodered";
 
@@ -15,10 +15,23 @@ test("the commit sets the image tag, versioned file and registry login, and leav
     assert.equal(project.file, "/iot-nodered/compose-sha-abc1234.yaml");
     const params = Object.fromEntries(project.parameters.map(p => [p.key, p.value]));
     assert.deepEqual(params, {
-        IMAGE_TAG: "sha-abc1234", GATEWAY_ID: "$(GATEWAY_ID)", NODE_RED_PASSWORD: "$(NODE_RED_PASSWORD)",
-        NODE_RED_PORT: "$(NODE_RED_PORT)", MQTT_PORT: "$(MQTT_PORT)"
+        IMAGE_TAG: "sha-abc1234", GATEWAY_ID: "$(GATEWAY_ID)", GATEWAY_INSTANCE: "1", NODE_RED_PASSWORD: "$(NODE_RED_PASSWORD)",
+        NODE_RED_PORT: "$(NODE_RED_PORT)", MQTT_PORT: "$(MQTT_PORT)", SIM_REPLICAS: "0"
     });
+    assert.equal(project.skip_restart, true, "exited one-shot containers must not restart the project");
+    assert.equal(change.config.clean, true, "projects no longer listed are removed");
     assert.deepEqual(change.config.registry_auths, [{ server: "ghcr.io", username: "bot", password: "tok" }]);
+});
+
+test("several gateways per device get their own project, number and ports; the simulator is switched on", () => {
+    const { items } = buildCommit({ group: "g", tag: "t", instances: 3, simulator: true }).changes[0].config;
+    const params = items.map(item => Object.fromEntries(item.parameters.map(p => [p.key, p.value])));
+    assert.deepEqual(items.map(item => item.name), ["iot-nodered", "iot-nodered-2", "iot-nodered-3"]);
+    assert.ok(items.every(item => item.file === "/iot-nodered/compose-t.yaml"));
+    assert.deepEqual(params.map(p => p.GATEWAY_INSTANCE), ["1", "2", "3"]);
+    assert.deepEqual(params.map(p => p.NODE_RED_PORT), ["$(NODE_RED_PORT)", "1881", "1882"]);
+    assert.deepEqual(params.map(p => p.MQTT_PORT), ["$(MQTT_PORT)", "8884", "8885"]);
+    assert.ok(params.every(p => p.GATEWAY_ID === "$(GATEWAY_ID)" && p.SIM_REPLICAS === "1"));
 });
 
 test("every template parameter in the Compose file is set by the commit", () => {
@@ -46,6 +59,21 @@ test("a device is ready only when Node-RED runs the new tag and is healthy", () 
     assert.match(deviceState(report(IMAGE + ":t1", "Up 2 hours (healthy)"), "t2").detail, /runs .*:t1/);
     assert.equal(deviceState(report(IMAGE + ":t2", "Up 5 seconds (health: starting)"), "t2").done, false);
     assert.equal(deviceState(report(IMAGE + ":t2", "Up 1 minute (healthy)"), "t2").done, true);
+});
+
+test("with several gateways, every one must run the new tag and be healthy", () => {
+    const gateway = (instance, tag, status) =>
+        ({ names: ["/" + projectName(instance) + "-nodered-1"], image: IMAGE + ":" + tag, status });
+    const report = (...items) => ({ docker_containers: { items } });
+    const healthy = "Up 1 minute (healthy)";
+    const partial = deviceState(report(gateway(1, "t2", healthy), gateway(2, "t1", healthy)), "t2", 3);
+    assert.equal(partial.done, false);
+    assert.match(partial.detail, /gateway 1: Up 1 minute \(healthy\); gateway 2: runs .*:t1; gateway 3: no Node-RED container yet/);
+    const all = report(gateway(1, "t2", healthy), gateway(2, "t2", healthy), gateway(3, "t2", healthy));
+    assert.equal(deviceState(all, "t2", 3).done, true);
+    // Gateway 10 is not mistaken for gateway 1, and a plain string name works too.
+    const tenth = { names: "iot-nodered-10-nodered-1", image: IMAGE + ":t2", status: healthy };
+    assert.equal(deviceState(report(tenth), "t2").done, false);
 });
 
 // A fake qbee API: records requests, and device d1 runs the new tag only after it has been asked twice.
