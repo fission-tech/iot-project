@@ -2,7 +2,7 @@
 
 Two suites check `nodered/flows.json`:
 
-- **Unit** (53 tests, about a second): runs the flow's Function node code straight from `flows.json`, with fake flow/context stores and a controllable clock, and checks the qbee deploy script against a fake qbee API. It needs no Node-RED, broker, Modbus device or qbee account.
+- **Unit** (60 tests, about a second): runs the flow's Function node code straight from `flows.json`, with fake flow/context stores and a controllable clock, and checks the qbee deploy script against a fake qbee API and the staging simulator against a fake registry API. It needs no Node-RED, broker, Modbus device or qbee account.
 - **End to end** (22 tests, about 2–3 minutes): drives a running Node-RED through its registry API, serves Modbus from built-in test servers, and reads the results from the MQTT broker. The reliability tests point the gateway at an in-process test broker (`aedes`) that they stop and start.
 
 ## Run
@@ -80,11 +80,21 @@ They restore `local` and the gateway's own broker setting afterwards. Stop the .
 
 | Area | Checked |
 | --- | --- |
-| Commit | Sets the image tag, the versioned Compose file and the GHCR login. Points the other parameters to qbee parameters. Sets every template parameter used in `compose.qbee.yaml`. |
+| Commit | Sets the image tag, the versioned Compose file and the GHCR login. Points the other parameters to qbee parameters. Sets every template parameter used in `compose.qbee.yaml`. Sets `clean` and `skip_restart`. |
+| Several gateways | One project per gateway (`iot-nodered`, `iot-nodered-2`, ...), each with its number, its own ports and the simulator switch |
 | Devices | Found at any depth below the group |
-| Ready | Only when the Node-RED container runs the new tag and reports `healthy` |
+| Ready | Only when the Node-RED container runs the new tag and reports `healthy`. With several gateways, every one must, found by its Compose container name; gateway 10 is not taken for gateway 1. |
 | Full run against a fake qbee API | Login, then upload, commit, device list and check-in, in that order. A failed check-in trigger is only logged. Waits until the device runs the new tag. |
 | Failures | A device that never gets ready fails with its state. An unknown group or a wrong password stops before anything changes, and an unknown group lists the IDs that exist. A dry run calls nothing and hides the registry password. |
+
+### Unit: `unit/simulator.test.js` (`deploy/simulator`)
+
+| Area | Checked |
+| --- | --- |
+| Plant | The pump stops for the last minute in ten, with zero flow. The tank goes from 20 to 90 % and back in 30 minutes. Values stay in range for an hour. |
+| Devices | The simulated pump and tank pass the registry's own validation |
+| Gateway ID | Gateway n > 1 gets `-n` appended, like `settings.js` |
+| Seeding | Retries while Node-RED is starting, logs in, leaves existing devices alone, and stops at once on a wrong password |
 
 ### End to end: `e2e/registry-api.test.js`
 

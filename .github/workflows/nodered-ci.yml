@@ -51,8 +51,10 @@ jobs:
 
       - name: Device Compose file is valid
         run: |
-          sed -e 's/{{IMAGE_TAG}}/ci/' -e 's/{{GATEWAY_ID}}/ci-gw/' -e 's/{{NODE_RED_PASSWORD}}/ci/' \
-              -e 's/{{NODE_RED_PORT}}/1880/' -e 's/{{MQTT_PORT}}/8883/' deploy/compose.qbee.yaml > "$RUNNER_TEMP/compose.qbee.yaml"
+          sed -e 's/{{IMAGE_TAG}}/ci/' -e 's/{{GATEWAY_ID}}/ci-gw/' -e 's/{{GATEWAY_INSTANCE}}/2/' -e 's/{{NODE_RED_PASSWORD}}/ci/' \
+              -e 's/{{NODE_RED_PORT}}/1880/' -e 's/{{MQTT_PORT}}/8883/' -e 's/{{SIM_REPLICAS}}/1/' \
+              deploy/compose.qbee.yaml > "$RUNNER_TEMP/compose.qbee.yaml"
+          if grep -n '{{' "$RUNNER_TEMP/compose.qbee.yaml"; then echo "Template parameter left unset" >&2; exit 1; fi
           docker compose -f "$RUNNER_TEMP/compose.qbee.yaml" config --quiet
 
       - name: Start the stack
@@ -93,6 +95,8 @@ jobs:
             image: iot-nodered-broker
           - target: certs
             image: iot-nodered-certs
+          - target: sim
+            image: iot-nodered-sim
     steps:
       - uses: actions/checkout@v7
 
