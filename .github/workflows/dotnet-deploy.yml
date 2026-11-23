@@ -1,0 +1,41 @@
+name: .NET gateway deploy
+on:
+  workflow_call:
+    inputs:
+      ref: {type: string, required: true}
+      simulator: {type: boolean, default: false}
+      tag: {type: string, default: ''}
+  workflow_dispatch:
+    inputs:
+      ref: {description: 'Commit containing the matching deployment files', type: string, required: true}
+      tag: {description: 'Existing immutable image tag (blank uses sha-<full commit>)', type: string, default: ''}
+      simulator: {description: 'Staging simulator (leave off for real equipment)', type: boolean, default: false}
+permissions: {contents: read}
+concurrency:
+  group: dotnet-qbee-${{ vars.DOTNET_QBEE_GROUP_ID }}
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with: {ref: '${{ inputs.ref }}'}
+      - uses: actions/setup-node@v7
+        with: {node-version: 22}
+      - name: Deploy and wait for healthy edge computers
+        env:
+          DOTNET_QBEE_EMAIL: ${{ secrets.ILYAAN_QBEE_EMAIL }}
+          DOTNET_QBEE_PASSWORD: ${{ secrets.ILYAAN_QBEE_PASSWORD }}
+          DOTNET_GHCR_USERNAME: ${{ secrets.ILYAAN_GHCR_USERNAME }}
+          DOTNET_GHCR_TOKEN: ${{ secrets.ILYAAN_GHCR_TOKEN }}
+          GROUP: ${{ vars.DOTNET_QBEE_GROUP_ID }}
+          TAG: ${{ inputs.tag }}
+          SIMULATOR: ${{ inputs.simulator }}
+        shell: bash
+        run: |
+          if [ -z "$GROUP" ]; then echo "Set DOTNET_QBEE_GROUP_ID to the dedicated .NET group." >&2; exit 1; fi
+          if [ -z "$TAG" ]; then TAG="sha-$(git rev-parse HEAD)"; fi
+          args=(--group "$GROUP" --tag "$TAG")
+          if [ "$SIMULATOR" = "true" ]; then args+=(--simulator); fi
+          node deploy/dotnet/qbee-deploy.cjs "${args[@]}"

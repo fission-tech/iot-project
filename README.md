@@ -1,5 +1,7 @@
 # IoT Project
 
+For the containerized .NET edge gateway, browser registry and qbee deployment, see [the edge deployment guide](deploy/dotnet/README.md).
+
 Requires .NET 8 SDK and Docker Desktop (Mosquitto, TimescaleDB and Grafana run as containers). MQTTX or MQTT Explorer to watch the broker.
 
 ```text

@@ -6,4 +6,6 @@ public sealed class DaqSettings
     public int ConfigRefreshSeconds { get; set; } = 10;
     public string StateDirectory { get; set; } = Path.Combine(AppContext.BaseDirectory, "state", "daq");
     public int FailedPollsBeforeOffline { get; set; } = 3;
+    public string Username { get; set; } = "";
+    public string Password { get; set; } = "";
 }

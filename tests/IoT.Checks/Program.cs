@@ -6,6 +6,12 @@ using Org.Eclipse.Tahu.Protobuf;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 
+if (args is ["--deployment-only"])
+{
+    DeploymentChecks.Run();
+    return;
+}
+
 if (args is ["--log-format-only"])
 {
     ErrorReportingChecks.FormatAndActivity();
@@ -429,3 +435,4 @@ DemoStatusChecks.Run();
 ConfigurationMigrationChecks.Run();
 MetricIdentityChecks.Run();
 await HistorianChecks.RunAsync();
+DeploymentChecks.Run();

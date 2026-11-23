@@ -1,0 +1,70 @@
+# qbee substitutes these parameters per edge computer. See README.md before deploying.
+services:
+  certs:
+    image: ghcr.io/fission-tech/iot-dotnet-certs:{{IMAGE_TAG}}
+    volumes: [broker-private:/private, broker-public:/public]
+    restart: "no"
+  mosquitto:
+    image: ghcr.io/fission-tech/iot-dotnet-broker:{{IMAGE_TAG}}
+    depends_on:
+      certs: {condition: service_completed_successfully}
+    ports: ["127.0.0.1:{{DOTNET_MQTT_PORT}}:8883"]
+    volumes: [broker-private:/mosquitto/certs:ro, broker-public:/mosquitto/public:ro, mqtt-data:/mosquitto/data]
+    restart: unless-stopped
+  configuration:
+    image: ghcr.io/fission-tech/iot-dotnet-configuration:{{IMAGE_TAG}}
+    depends_on:
+      certs: {condition: service_completed_successfully}
+    environment:
+      Configuration__Url: http://0.0.0.0:5300
+      Configuration__DatabasePath: /state/configuration.db
+      SeedBroker__Host: mosquitto
+      SeedBroker__CertificateLocation: /certs/broker.crt
+      Management__RequireAuthentication: "true"
+      Management__Username: admin
+      Management__Password: "{{DOTNET_MANAGEMENT_PASSWORD}}"
+      Management__PublicCertificatePath: /certs/broker.crt
+      Gateway__Id: "{{DOTNET_GATEWAY_ID}}"
+      GatewayStatus__Path: /gateway-state/status.json
+    ports: ["127.0.0.1:{{DOTNET_API_PORT}}:5300"]
+    volumes: [configuration-state:/state, gateway-state:/gateway-state:ro, broker-public:/certs:ro]
+    restart: unless-stopped
+  gateway:
+    image: ghcr.io/fission-tech/iot-dotnet-gateway:{{IMAGE_TAG}}
+    depends_on:
+      configuration: {condition: service_healthy}
+      mosquitto: {condition: service_started}
+    environment:
+      Gateway__DatabasePath: /state/outbox.db
+      Mqtt__Host: mosquitto
+      Mqtt__BrokerCertificatePath: /certs/broker.crt
+      Mqtt__ClientId: "{{DOTNET_GATEWAY_ID}}"
+      Mqtt__StateDirectory: /state/mqtt
+      Sparkplug__GroupId: "{{DOTNET_SPARKPLUG_GROUP}}"
+      Sparkplug__EdgeNodeId: "{{DOTNET_GATEWAY_ID}}"
+      Sparkplug__HostId: ""
+      Daq__ConfigUrl: http://configuration:5300
+      Daq__StateDirectory: /state/daq
+      Daq__Username: admin
+      Daq__Password: "{{DOTNET_MANAGEMENT_PASSWORD}}"
+    volumes: [gateway-state:/state, broker-public:/certs:ro]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    stop_grace_period: 30s
+    restart: unless-stopped
+  # Staging only. There is no published Modbus port, and seeding never overwrites existing devices.
+  modbus-sim:
+    image: ghcr.io/fission-tech/iot-dotnet-simulator:{{IMAGE_TAG}}
+    deploy: {replicas: {{SIM_REPLICAS}}}
+    depends_on:
+      configuration: {condition: service_healthy}
+    environment:
+      CONFIGURATION_URL: http://configuration:5300
+      MANAGEMENT_PASSWORD: "{{DOTNET_MANAGEMENT_PASSWORD}}"
+      GATEWAY_ID: "{{DOTNET_GATEWAY_ID}}"
+    restart: unless-stopped
+volumes:
+  broker-private:
+  broker-public:
+  mqtt-data:
+  configuration-state:
+  gateway-state:

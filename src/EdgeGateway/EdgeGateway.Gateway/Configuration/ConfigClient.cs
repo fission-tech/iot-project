@@ -9,9 +9,20 @@ namespace EdgeGateway.Gateway.Configuration;
 // assigns to gatewayId, else the one named by brokerId.
 public sealed class ConfigClient(DaqSettings settings, string? brokerId = null, string? gatewayId = null) : IDisposable
 {
-    private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(3) };
+    private readonly HttpClient _http = CreateClient(settings);
     private readonly string _cachePath = Path.Combine(settings.StateDirectory, "config-cache.json");
     private bool _brokerMissing;
+
+    private static HttpClient CreateClient(DaqSettings settings)
+    {
+        if (string.IsNullOrEmpty(settings.Username) != string.IsNullOrEmpty(settings.Password))
+            throw new ArgumentException("Configuration API username and password must be supplied together.");
+        var client = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
+        if (settings.Username.Length > 0)
+            client.DefaultRequestHeaders.Authorization = new("Basic", Convert.ToBase64String(
+                System.Text.Encoding.UTF8.GetBytes(settings.Username + ":" + settings.Password)));
+        return client;
+    }
 
     public async Task<GatewayConfiguration?> TryFetchAsync(CancellationToken cancellationToken)
     {

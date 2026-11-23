@@ -1,0 +1,46 @@
+FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+ARG TARGETARCH
+WORKDIR /source
+COPY Directory.Build.props ./
+COPY schemas/ schemas/
+COPY src/IoT.Contracts/ src/IoT.Contracts/
+COPY src/EdgeGateway/EdgeGateway.Gateway/ src/EdgeGateway/EdgeGateway.Gateway/
+COPY src/EdgeGateway/EdgeGateway.Configuration/ src/EdgeGateway/EdgeGateway.Configuration/
+COPY deploy/dotnet/simulator/ deploy/dotnet/simulator/
+RUN --mount=type=cache,target=/root/.nuget/packages dotnet publish src/EdgeGateway/EdgeGateway.Gateway -a "$TARGETARCH" -c Release -o /publish/gateway /p:UseAppHost=false \
+ && dotnet publish src/EdgeGateway/EdgeGateway.Configuration -a "$TARGETARCH" -c Release -o /publish/configuration /p:UseAppHost=false \
+ && dotnet publish deploy/dotnet/simulator -a "$TARGETARCH" -c Release -o /publish/simulator /p:UseAppHost=false
+
+FROM mcr.microsoft.com/dotnet/runtime:8.0 AS gateway
+WORKDIR /app
+COPY --from=build /publish/gateway/ ./
+RUN mkdir -p /state && chown app:app /state
+USER app
+ENV Gateway__DatabasePath=/state/outbox.db
+ENTRYPOINT ["dotnet", "EdgeGateway.Gateway.dll"]
+# The existing worker atomically refreshes this file every second. No extra .NET process or API is needed.
+HEALTHCHECK --interval=10s --timeout=5s --start-period=60s --retries=3 CMD status="${Gateway__DatabasePath%/*}/status.json"; test -f "$status" && age=$(( $(date +%s) - $(stat -c%Y "$status") )) && test "$age" -ge 0 && test "$age" -le 15
+
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS configuration
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /state && chown app:app /state
+COPY --from=build /publish/configuration/ ./
+USER app
+ENTRYPOINT ["dotnet", "EdgeGateway.Configuration.dll"]
+HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=3 CMD curl --fail --silent http://127.0.0.1:5300/health || exit 1
+
+FROM eclipse-mosquitto:2.1.2-alpine AS broker
+COPY deploy/dotnet/mosquitto.conf /mosquitto/config/mosquitto.conf
+USER mosquitto
+
+FROM alpine:3.22 AS certs
+RUN apk add --no-cache openssl
+COPY deploy/dotnet/certificates.sh /certificates.sh
+ENTRYPOINT ["sh", "/certificates.sh"]
+
+FROM mcr.microsoft.com/dotnet/runtime:8.0 AS simulator
+WORKDIR /app
+COPY --from=build /publish/simulator/ ./
+USER app
+ENTRYPOINT ["dotnet", "EdgeGateway.Simulator.dll"]

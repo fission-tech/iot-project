@@ -7,3 +7,8 @@ logs/
 state/
 broker/certs/
 appsettings.json
+**/appsettings.json
+**/state/
+**/.env
+simulators/
+**/node_modules/

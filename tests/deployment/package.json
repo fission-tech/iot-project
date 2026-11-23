@@ -1,0 +1,6 @@
+{
+  "name": "dotnet-edge-browser-checks",
+  "private": true,
+  "scripts": { "test": "node --test browser.test.cjs" },
+  "devDependencies": { "playwright": "1.65.1" }
+}

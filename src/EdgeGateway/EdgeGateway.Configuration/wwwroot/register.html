@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Gateway registry</title><link rel="stylesheet" href="/register.css"><script src="/register.js" defer></script></head>
+<body>
+<main>
+  <header><div><h1>Device registry</h1><p>Configure Modbus TCP devices and their metrics.</p></div><button id="refresh">Refresh</button></header>
+  <p id="notice" role="status" hidden></p>
+  <section><div class="heading"><h2>Devices</h2><button id="add-device">Add device</button></div><div class="scroll"><table><thead><tr><th>Device</th><th>Connection</th><th>Unit / interval</th><th>Metrics</th><th>Status</th><th>Actions</th></tr></thead><tbody id="devices"></tbody></table></div><p id="empty-devices" hidden>No devices registered. Add an interface, then add a device.</p></section>
+  <section><div class="heading"><h2>Interfaces</h2><button id="add-interface">Add interface</button></div><p>Devices can share one TCP connection. Register addresses start at 0.</p><div class="scroll"><table><thead><tr><th>Interface</th><th>Endpoint</th><th>Actions</th></tr></thead><tbody id="interfaces"></tbody></table></div></section>
+  <section><div class="heading"><h2>MQTT brokers</h2><button id="add-broker">Add broker</button></div><a href="/broker-certificate" download>Download local broker certificate</a><div class="scroll"><table><thead><tr><th>Broker</th><th>Endpoint</th><th>Trust certificate</th><th>Actions</th></tr></thead><tbody id="brokers"></tbody></table></div><h3>Gateway broker assignment</h3><p>The gateway uses its default broker until an assignment is saved.</p><div id="assignment"></div></section>
+</main>
+<dialog id="editor"><form id="edit-form"><div class="heading"><h2 id="editor-title"></h2><button type="button" id="close-editor" aria-label="Close">✕</button></div><div id="fields"></div><p id="form-error" role="alert" hidden></p><footer><button type="button" id="cancel-editor">Cancel</button><button type="submit" id="save">Save</button></footer></form></dialog>
+</body></html>

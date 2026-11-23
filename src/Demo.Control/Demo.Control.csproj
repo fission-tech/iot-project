@@ -8,6 +8,6 @@
     <PackageReference Include="MQTTnet" Version="5.2.0.1603" />
     <ProjectReference Include="../IoT.Contracts/IoT.Contracts.csproj" />
     <Content Update="wwwroot/**" CopyToOutputDirectory="PreserveNewest" />
-    <None Include="../../broker/certs/broker.crt" Link="certs/broker.crt" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../broker/certs/broker.crt" Link="certs/broker.crt" CopyToOutputDirectory="PreserveNewest" Condition="Exists('../../broker/certs/broker.crt')" />
   </ItemGroup>
 </Project>

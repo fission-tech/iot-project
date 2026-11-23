@@ -31,14 +31,19 @@ using var terminate = PosixSignalRegistration.Create(PosixSignal.SIGTERM, Reques
 try
 {
     var configuration = new ConfigurationBuilder().SetBasePath(AppContext.BaseDirectory)
-        .AddJsonFile("appsettings.json").AddCommandLine(args).Build();
+        .AddJsonFile("appsettings.json", optional: true).AddEnvironmentVariables()
+        .AddCommandLine(args).Build();
     loggers = LoggerFactory.Create(builder => builder
         .AddConfiguration(configuration.GetSection("Logging"))
         .AddConsole(options => options.FormatterName = "gateway")
         .AddConsoleFormatter<GatewayConsoleFormatter, ConsoleFormatterOptions>());
     log = loggers.CreateLogger("Gateway");
     var settings = configuration.Get<GatewaySettings>()
-        ?? throw new InvalidOperationException("Could not read appsettings.json.");
+        ?? throw new InvalidOperationException("Could not read gateway configuration.");
+    if (configuration.GetValue<bool>("DOTNET_RUNNING_IN_CONTAINER") &&
+        new[] { settings.Mqtt.ClientId, settings.Sparkplug.GroupId, settings.Sparkplug.EdgeNodeId }
+            .Any(id => !System.Text.RegularExpressions.Regex.IsMatch(id, "^[A-Za-z0-9_-]+$")))
+        throw new InvalidOperationException("Set valid gateway and Sparkplug IDs before deploying (letters, digits, underscores or hyphens).");
     using var outbox = new Outbox(settings.Gateway.DatabasePath);
     using var connection = new MqttConnection(settings.Mqtt, settings.Sparkplug, loggers.CreateLogger<MqttConnection>());
     // Broker settings come from the registry: the broker assigned to this gateway (its client ID), else the row named
