@@ -15,12 +15,35 @@ concurrency:
   group: dotnet-qbee-${{ vars.DOTNET_QBEE_GROUP_ID }}
   cancel-in-progress: false
 jobs:
-  deploy:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      ref: ${{ steps.plan.outputs.ref }}
+      tag: ${{ steps.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with: {ref: '${{ inputs.ref }}'}
+      - id: plan
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          ref="$(git rev-parse HEAD)"
+          tag="$INPUT_TAG"
+          if [ -z "$tag" ]; then tag="sha-$ref"; fi
+          if [[ ! "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "Not a valid image tag: $tag" >&2; exit 1
+          fi
+          { echo "ref=$ref"; echo "tag=$tag"; } >> "$GITHUB_OUTPUT"
+          echo "Deploy $tag (from $ref) to the configured .NET staging group"
+  staging:
+    needs: plan
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
-        with: {ref: '${{ inputs.ref }}'}
+        with: {ref: '${{ needs.plan.outputs.ref }}'}
       - uses: actions/setup-node@v7
         with: {node-version: 22}
       - name: Deploy and wait for healthy edge computers
@@ -30,12 +53,11 @@ jobs:
           DOTNET_GHCR_USERNAME: ${{ secrets.ILYAAN_GHCR_USERNAME }}
           DOTNET_GHCR_TOKEN: ${{ secrets.ILYAAN_GHCR_TOKEN }}
           GROUP: ${{ vars.DOTNET_QBEE_GROUP_ID }}
-          TAG: ${{ inputs.tag }}
+          TAG: ${{ needs.plan.outputs.tag }}
           SIMULATOR: ${{ inputs.simulator }}
         shell: bash
         run: |
           if [ -z "$GROUP" ]; then echo "Set DOTNET_QBEE_GROUP_ID to the dedicated .NET group." >&2; exit 1; fi
-          if [ -z "$TAG" ]; then TAG="sha-$(git rev-parse HEAD)"; fi
           args=(--group "$GROUP" --tag "$TAG")
           if [ "$SIMULATOR" = "true" ]; then args+=(--simulator); fi
           node deploy/dotnet/qbee-deploy.cjs "${args[@]}"

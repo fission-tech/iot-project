@@ -47,6 +47,7 @@ jobs:
           done
           EDGE_TEST_PLATFORM=linux/arm64 EDGE_IMAGE_TAG=local-arm64 node --test tests/deployment/stack.test.cjs
   publish:
+    name: publish (${{ matrix.target }}, iot-dotnet-${{ matrix.target }})
     needs: test
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
