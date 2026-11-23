@@ -7,7 +7,7 @@ COPY src/IoT.Contracts/ src/IoT.Contracts/
 COPY src/EdgeGateway/EdgeGateway.Gateway/ src/EdgeGateway/EdgeGateway.Gateway/
 COPY src/EdgeGateway/EdgeGateway.Configuration/ src/EdgeGateway/EdgeGateway.Configuration/
 COPY deploy/dotnet/simulator/ deploy/dotnet/simulator/
-RUN --mount=type=cache,target=/root/.nuget/packages dotnet publish src/EdgeGateway/EdgeGateway.Gateway -a "$TARGETARCH" -c Release -o /publish/gateway /p:UseAppHost=false \
+RUN --mount=type=cache,id=dotnet-nuget-${TARGETARCH},target=/root/.nuget/packages,sharing=locked dotnet publish src/EdgeGateway/EdgeGateway.Gateway -a "$TARGETARCH" -c Release -o /publish/gateway /p:UseAppHost=false \
  && dotnet publish src/EdgeGateway/EdgeGateway.Configuration -a "$TARGETARCH" -c Release -o /publish/configuration /p:UseAppHost=false \
  && dotnet publish deploy/dotnet/simulator -a "$TARGETARCH" -c Release -o /publish/simulator /p:UseAppHost=false
 
