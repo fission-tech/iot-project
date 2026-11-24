@@ -15,8 +15,8 @@ public sealed class ConfigClient(DaqSettings settings, string? brokerId = null, 
 
     private static HttpClient CreateClient(DaqSettings settings)
     {
-        if (string.IsNullOrEmpty(settings.Username) != string.IsNullOrEmpty(settings.Password))
-            throw new ArgumentException("Configuration API username and password must be supplied together.");
+        if (settings.Username.Length == 0 && settings.Password.Length > 0)
+            throw new ArgumentException("Configuration API username is required when a password is supplied.");
         var client = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
         if (settings.Username.Length > 0)
             client.DefaultRequestHeaders.Authorization = new("Basic", Convert.ToBase64String(

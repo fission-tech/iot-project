@@ -39,7 +39,8 @@ while (!stop.IsCancellationRequested)
         }
         break;
     }
-    catch (HttpRequestException error) { Console.WriteLine("Simulator registration retry: " + error.Message); await Task.Delay(2000, stop.Token); }
+    catch (Exception error) when (error is HttpRequestException || error is OperationCanceledException && !stop.IsCancellationRequested)
+    { Console.WriteLine("Simulator registration retry: " + error.Message); await Task.Delay(2000, stop.Token); }
 }
 Console.WriteLine("Modbus simulator listening on 1502 (units 1 and 2).");
 try

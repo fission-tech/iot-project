@@ -8,15 +8,20 @@ const project = 'dotnet-check-' + Date.now();
 const directory = path.join(root, 'logs', 'dotnet-qbee');
 fs.mkdirSync(directory, { recursive: true });
 const compose = path.join(directory, project + '.yaml');
-const password = 'isolated-test-password-123456789';
+let password = process.env.EDGE_TEST_PASSWORD ?? 'ci-env-password-123';
 const platform = process.env.EDGE_TEST_PLATFORM || 'linux/amd64';
 const params = { IMAGE_TAG: process.env.EDGE_IMAGE_TAG || 'local', DOTNET_GATEWAY_ID: 'ci-edge-01', DOTNET_SPARKPLUG_GROUP: 'ci-plant', DOTNET_MANAGEMENT_PASSWORD: password, DOTNET_API_PORT: '5300', DOTNET_MQTT_PORT: '8883', SIM_REPLICAS: '1' };
 let template = fs.readFileSync(path.join(root, 'deploy/dotnet/compose.qbee.yaml'), 'utf8');
-template = template.replace(/\{\{(\w+)\}\}/g, (_, key) => { if (!(key in params)) throw new Error('Unknown parameter ' + key); return params[key]; });
 // Tests communicate inside Docker. No existing host port or application is touched.
 template = template.replace(/^\s*ports:.*\r?\n/gm, '\n').replaceAll('ghcr.io/fission-tech/', '');
 template = template.replace(/^(\s*)image: (.+)$/gm, `$&\n$1platform: ${platform}`);
-fs.writeFileSync(compose, template);
+function writeCompose() {
+  fs.writeFileSync(compose, template.replace(/\{\{(\w+)\}\}/g, (_, key) => {
+    if (!(key in params)) throw new Error('Unknown parameter ' + key);
+    return params[key];
+  }));
+}
+writeCompose();
 function docker(...args) { return execFileSync('docker', args, { cwd: root, encoding: 'utf8', timeout: 210000, maxBuffer: 8 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] }).trim(); }
 function dc(...args) { return docker('compose', '-p', project, '-f', compose, ...args); }
 function curl(route, { method = 'GET', data, auth = true, extra = [], json = true } = {}) {
@@ -65,7 +70,7 @@ test('containerized edge stack: TLS, API, polling, outage buffering and persiste
     await wait('registry restarted', () => curl('/devices/' + device.id).description === device.description);
     assert.equal(curl('/brokers/local').keepAliveSeconds, 45);
     assert.equal(curl('/devices/' + device.id).metrics[0].id, metricId);
-    const seq = sample().lastSeq;
+    const seq = (await wait('polling before gateway restart', sample)).lastSeq;
     dc('restart', 'gateway');
     await wait('sequence survives restart', () => sample()?.lastSeq > seq);
     assert.equal(curl('/brokers/local').keepAliveSeconds, 45);
@@ -78,14 +83,14 @@ test('containerized edge stack: TLS, API, polling, outage buffering and persiste
     dc('start', 'mosquitto');
     await wait('broker reconnect and drain', () => status().upstream === 'Online' && status().unsent === 0);
     console.log('PASS: MQTT outage buffers to disk, survives restart and drains on reconnect.');
-    const beforeCache = sample().lastSeq;
+    const beforeCache = (await wait('polling after broker recovery', sample)).lastSeq;
     dc('stop', 'configuration'); dc('restart', 'gateway');
     await wait('cached polling without registry', () => {
       const value = JSON.parse(dc('exec', '-T', 'gateway', 'cat', '/state/status.json'));
       return !value.config.reachable && value.devices.find(d => d.deviceId === device.id)?.lastSeq > beforeCache;
     });
     dc('start', 'configuration');
-    await wait('cached polling continued', () => sample()?.lastSeq > beforeCache);
+    await wait('registry ready and cached polling continued', () => curl('/health', { json: false }) === 'ok' && sample()?.lastSeq > beforeCache);
     dc('stop', 'gateway'); await delay(16500);
     assert.deepEqual(curl('/device-status').devices, [], 'stopped worker must not report live devices');
     dc('start', 'gateway');
@@ -97,6 +102,15 @@ test('containerized edge stack: TLS, API, polling, outage buffering and persiste
     assert.equal(curl('/brokers/local').keepAliveSeconds, 45);
     assert.equal(curl('/broker-certificate', { json: false }), certificate, 'restart changed trusted certificate');
     console.log('PASS: Stale status detection and whole-stack recreation preserve data and certificates.');
+    for (const chosenPassword of ['x', '']) {
+      const previous = (await wait('polling before password rotation', sample)).lastSeq;
+      password = chosenPassword; params.DOTNET_MANAGEMENT_PASSWORD = password; writeCompose();
+      dc('up', '-d', '--wait', '--wait-timeout', '180');
+      await wait('password change keeps authenticated polling and publishing', () =>
+        curl('/devices/' + device.id).metrics[0].id === metricId && sample()?.lastSeq > previous && status().upstream === 'Online');
+      assert.throws(() => curl('/devices', { auth: false }), /failed|401|Command/);
+    }
+    console.log('PASS: One-character and empty password rotations keep authentication, polling, MQTT and saved device identity.');
   } catch (error) {
     console.error(dc('logs', '--no-color', '--tail', '60')); throw error;
   } finally {

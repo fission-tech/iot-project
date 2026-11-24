@@ -37,10 +37,31 @@ function client(base, token) {
     const options = { method, headers, signal: AbortSignal.timeout(30000) };
     if (body instanceof FormData) options.body = body;
     else if (body !== undefined) { headers['Content-Type'] = 'application/json'; options.body = JSON.stringify(body); }
-    const response = await fetch(base + route, options);
-    if (!response.ok) throw new Error(`${method} ${route} failed (${response.status}). Check qbee credentials, group permissions and parameters.`);
+    const response = await fetch(base + route, options).catch(() => {
+      throw new Error(`${method} ${route} failed (network or timeout).`);
+    });
+    if (!response.ok) throw Object.assign(new Error(`${method} ${route} failed (${response.status}). Check qbee credentials, group permissions and parameters.`), { status: response.status });
     const text = await response.text();
-    return text ? JSON.parse(text) : null;
+    try { return text ? JSON.parse(text) : null; }
+    catch { throw new Error(`${method} ${route} returned invalid JSON.`); }
+  };
+}
+async function authenticatedClient(base, email, password, log) {
+  let call;
+  async function login() {
+    const { token } = await client(base)('POST', '/api/v2/login', { email, password });
+    if (!token) throw new Error('qbee login returned no token.');
+    call = client(base, token);
+  }
+  await login();
+  return async (method, route, body) => {
+    try { return await call(method, route, body); }
+    catch (error) {
+      if (error.status !== 401) throw error;
+      log('qbee session expired or rejected; signing in again and retrying the request once.');
+      await login();
+      return call(method, route, body);
+    }
   };
 }
 async function deploy(options, log = console.log) {
@@ -55,9 +76,7 @@ async function deploy(options, log = console.log) {
   }
   for (const key of ['email', 'password', 'registryUser', 'registryToken']) if (!options[key]) throw new Error(`Missing ${key}.`);
   const base = options.api || 'https://www.app.qbee.io';
-  const { token } = await client(base)('POST', '/api/v2/login', { email: options.email, password: options.password });
-  if (!token) throw new Error('qbee login returned no token.');
-  const call = client(base, token);
+  const call = await authenticatedClient(base, options.email, options.password, log);
   const tree = await call('GET', '/api/v2/grouptree/' + encodeURIComponent(group));
   if (tree.type !== 'group') throw new Error('Target must be a dedicated .NET group.');
   const devices = [...new Set(findDevices(tree))];
@@ -73,8 +92,13 @@ async function deploy(options, log = console.log) {
   for (;;) {
     const states = [];
     for (const id of devices) {
-      const report = await call('GET', '/api/v2/inventoryreport/docker/' + encodeURIComponent(id)).catch(() => null);
-      const state = deviceState(report, tag, simulator); states.push(state);
+      let state;
+      try { state = deviceState(await call('GET', '/api/v2/inventoryreport/docker/' + encodeURIComponent(id)), tag, simulator); }
+      catch (error) {
+        if (error.status >= 400 && error.status < 500 && ![404, 429].includes(error.status)) throw error;
+        state = { done: false, detail: `inventory unavailable: ${error.message}` };
+      }
+      states.push(state);
       if (last.get(id) !== state.detail) { log(`${id}: ${state.detail}`); last.set(id, state.detail); }
     }
     if (states.every(s => s.done)) { log('Every target runs the requested version and reports healthy.'); return { devices }; }

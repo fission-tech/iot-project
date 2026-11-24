@@ -11,7 +11,7 @@ test('registry page creates and edits records without losing metric identity', {
   const directory = fs.mkdtempSync(path.join(logs, 'browser-'));
   const listener = net.createServer(); await new Promise(resolve => listener.listen(0, '127.0.0.1', resolve));
   const port = listener.address().port; await new Promise(resolve => listener.close(resolve));
-  const baseURL = `http://127.0.0.1:${port}`, password = 'browser-check-password-12345678';
+  const baseURL = `http://127.0.0.1:${port}`, password = 'x';
   const statusPath = path.join(directory, 'status.json');
   const app = spawn('dotnet', [path.join(logs, 'browser-app/EdgeGateway.Configuration.dll'), '--Configuration:Url=' + baseURL,
     '--Configuration:DatabasePath=' + path.join(directory, 'configuration.db'), '--GatewayStatus:Path=' + statusPath,
@@ -75,4 +75,33 @@ test('registry page creates and edits records without losing metric identity', {
     if (app.exitCode === null) { const ended = new Promise(resolve => app.once('exit', resolve)); app.kill(); await ended; }
     fs.writeFileSync(path.join(directory, 'service.log'), output);
   }
+});
+
+test('environment passwords have no application length or character restriction and keep authentication enabled', { timeout: 60000 }, async () => {
+  for (const password of ['', ' ', 'quotes\'"\\:$${SHELL}\r\n\t雪🙂 trailing  ', '\uFEFF', 'x'.repeat(4096)]) {
+    const directory = fs.mkdtempSync(path.join(root, 'logs/dotnet-qbee/password-api-'));
+    const listener = net.createServer(); await new Promise(resolve => listener.listen(0, '127.0.0.1', resolve));
+    const port = listener.address().port; await new Promise(resolve => listener.close(resolve));
+    const baseURL = `http://127.0.0.1:${port}`;
+    const app = spawn('dotnet', [path.join(root, 'logs/dotnet-qbee/browser-app/EdgeGateway.Configuration.dll'),
+      '--Configuration:Url=' + baseURL, '--Configuration:DatabasePath=' + path.join(directory, 'configuration.db'),
+      '--Gateway:Id=password-check', '--Management:RequireAuthentication=true'],
+      { cwd: root, env: { ...process.env, Management__Password: password }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = ''; app.stdout.on('data', data => output += data); app.stderr.on('data', data => output += data);
+    try {
+      for (let attempt = 0; attempt < 100; attempt++) {
+        if (app.exitCode !== null) throw new Error(output);
+        if (await fetch(baseURL + '/health').then(r => r.ok).catch(() => false)) break;
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      const headers = value => ({ Authorization: 'Basic ' + Buffer.from(value, 'utf8').toString('base64') });
+      assert.equal((await fetch(baseURL + '/devices')).status, 401, 'missing credentials must still be refused');
+      assert.equal((await fetch(baseURL + '/devices', { headers: headers('admin:' + password) })).status, 200);
+      assert.equal((await fetch(baseURL + '/devices', { headers: headers('admin:' + password + 'wrong') })).status, 401);
+      assert.equal((await fetch(baseURL + '/devices', { headers: headers('other:' + password) })).status, 401);
+    } finally {
+      if (app.exitCode === null) { const ended = new Promise(resolve => app.once('exit', resolve)); app.kill(); await ended; }
+    }
+  }
+  console.log('PASS: Empty, whitespace, special, Unicode and long environment passwords; anonymous/wrong credentials rejected.');
 });

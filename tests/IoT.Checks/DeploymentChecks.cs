@@ -41,6 +41,11 @@ internal static class DeploymentChecks
             const string username = "operator", password = "correct:pässword";
             string Header(string value) => "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes(value));
             Check(ManagementAccess.Matches(Header(username + ":" + password), username, password), "valid UTF-8 credentials refused");
+            foreach (var chosenPassword in new[] { "", "x", " ", "quotes'\"\\:$${SHELL}\r\n\t雪🙂 ", "\uFEFF\0", new string('x', 4096) })
+                Check(ManagementAccess.Matches(Header(username + ":" + chosenPassword), username, chosenPassword),
+                    "chosen password length or characters changed");
+            using (var client = new EdgeGateway.Gateway.Configuration.ConfigClient(new()
+                { Username = username, Password = "", StateDirectory = directory })) { }
             foreach (var header in new[] { null, "Basic ???", Header("operator:wrong"), Header("wrong:" + password), "Bearer token", Header("no-colon") })
                 Check(!ManagementAccess.Matches(header, username, password), "invalid credentials accepted");
             var statusPath = Path.Combine(directory, "status.json");

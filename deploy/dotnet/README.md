@@ -15,11 +15,11 @@ The continuous services are `configuration` (registry API and `/register` page),
 | --- | --- | --- |
 | `DOTNET_GATEWAY_ID` | `dotnet-edge-01` | Device; unique across the fleet, including other groups |
 | `DOTNET_SPARKPLUG_GROUP` | `factory-a` | Group/site |
-| `DOTNET_MANAGEMENT_PASSWORD` | Random 32+ character secret | Secret parameter; group or device |
+| `DOTNET_MANAGEMENT_PASSWORD` | Your chosen password; see escaping notes below | Secret parameter; group or device |
 | `DOTNET_API_PORT` | `5300` | Group; select an unused VM port |
 | `DOTNET_MQTT_PORT` | `8883` | Group; select an unused VM port |
 
-Use letters, digits, `_` and `-` for IDs and the generated password. This avoids YAML/Compose template interpolation characters. The password is for the registry's `admin` user, not a qbee or GitHub password. Do not commit it. Gateway identity and Sparkplug group form MQTT topics: changing identity changes the published source, so keep them stable.
+Use letters, digits, `_` and `-` for IDs. The application imposes no password length or character policy. Like the Node-RED deployment, qbee substitutes the password into Compose environment variables. Avoid `$`, or enter `$$` for a literal dollar sign; quotes and backslashes must also be escaped for the double-quoted YAML value. This raw templating does not automatically preserve arbitrary characters. Root/Docker administrators can see environment values through `docker inspect`. Even an empty password still requires the `admin` username when deployment authentication is enabled. The password is for the registry's `admin` user, not a qbee or GitHub password. Do not commit it. Gateway identity and Sparkplug group form MQTT topics: changing identity changes the published source, so keep them stable.
 
 ## GitHub configuration
 
@@ -33,6 +33,8 @@ The workflows use separate .NET names so existing Node-RED variables do not acci
 CI runs the existing executable checks, browser/deployment-script tests and isolated Docker integration checks for amd64 and arm64 (ARM64 through QEMU). On a push to `feature/dotnet-qbee` or `main`, it publishes five multi-platform packages: `iot-dotnet-gateway`, `iot-dotnet-configuration`, `iot-dotnet-broker`, `iot-dotnet-certs`, `iot-dotnet-simulator`. The tag is `sha-<full commit>`, never `latest`. Docker selects the computer's matching architecture. Real ARM hardware still needs its own acceptance check for physical network/equipment access.
 
 After publishing, CI deploys to the configured .NET staging group with the simulator enabled. Each computer gets its own substituted parameters. The script refuses an empty group, commits a versioned Compose file and waits until gateway/configuration are healthy and the requested broker/simulator versions are running on every target. An offline computer causes a timeout rather than a false success. Large fleets should roll out first to a small staging/canary group, then to separate production groups after validation.
+
+If qbee rejects an expired session with HTTP 401, the script signs in again and retries that request once. Persistent authentication/permission errors fail immediately. Temporary inventory/network errors are reported explicitly and retried within the rollout timeout; they are not shown as missing containers. Credentials and API response bodies are never included in these error messages.
 
 Manual deployments use `.NET gateway deploy` with the matching commit and image tag; leave simulator off for real equipment. The workflow file must exist on the repository's default branch for GitHub's **Run workflow** UI to appear. Until then, feature-branch pushes run CI, and existing runs can be re-run. Only one deployment to a group runs at a time.
 

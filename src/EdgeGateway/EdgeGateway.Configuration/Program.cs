@@ -17,8 +17,8 @@ var databasePath = builder.Configuration["Configuration:DatabasePath"]
 var username = builder.Configuration["Management:Username"] ?? "admin";
 var password = builder.Configuration["Management:Password"] ?? "";
 var authenticationRequired = builder.Configuration.GetValue<bool>("Management:RequireAuthentication");
-if ((authenticationRequired && !System.Text.RegularExpressions.Regex.IsMatch(password, "^[A-Za-z0-9_-]{16,}$")) || username.Length == 0 || username.Contains(':'))
-    throw new InvalidOperationException("Management requires a username without ':' and a deployment password of at least 16 letters, digits, underscores or hyphens.");
+if (username.Length == 0 || username.Contains(':'))
+    throw new InvalidOperationException("Management requires a username without ':'.");
 if (authenticationRequired && !System.Text.RegularExpressions.Regex.IsMatch(builder.Configuration["Gateway:Id"] ?? "", "^[A-Za-z0-9_-]+$"))
     throw new InvalidOperationException("Set Gateway:Id to this edge computer's unique ID (letters, digits, underscores or hyphens).");
 BrokerProfile? seed = null;
@@ -35,7 +35,7 @@ app.Use(async (context, next) =>
     context.Response.Headers.CacheControl = "no-store";
     context.Response.Headers["X-Content-Type-Options"] = "nosniff";
     context.Response.Headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
-    if (context.Request.Path != "/health" && password.Length > 0 &&
+    if (context.Request.Path != "/health" && (authenticationRequired || password.Length > 0) &&
         !ManagementAccess.Matches(context.Request.Headers.Authorization, username, password))
     {
         context.Response.Headers.WWWAuthenticate = "Basic realm=\"Gateway management\", charset=\"UTF-8\"";
