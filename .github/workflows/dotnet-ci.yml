@@ -12,40 +12,59 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   test:
+    name: test (${{ matrix.suite }})
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    strategy:
+      matrix:
+        include:
+          - suite: application
+          - suite: amd64
+            platform: linux/amd64
+            image-tag: local
+          - suite: arm64
+            platform: linux/arm64
+            image-tag: local-arm64
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-dotnet@v5
+        if: matrix.suite == 'application'
         with: {dotnet-version: '8.0.x'}
       - uses: actions/setup-node@v7
         with: {node-version: 22}
       - run: dotnet build IoT.sln -c Release --nologo
+        if: matrix.suite == 'application'
       # IoT.Checks is an executable, not a dotnet test project.
       - run: dotnet tests/IoT.Checks/bin/Release/net8.0/IoT.Checks.dll
+        if: matrix.suite == 'application'
         env: {HISTORIAN_TEST_CONNECTION: ''}
       - run: node --test tests/deployment/qbee.test.cjs
+        if: matrix.suite == 'application'
       - name: Browser registry checks
+        if: matrix.suite == 'application'
         run: |
           dotnet publish src/EdgeGateway/EdgeGateway.Configuration -c Release -o logs/dotnet-qbee/browser-app
           npm ci --prefix tests/deployment --no-audit --no-fund
           cd tests/deployment
           npx playwright install --with-deps chromium
           npm test
+      - uses: docker/setup-qemu-action@v4
+        if: matrix.suite == 'arm64'
       - name: Build edge images
+        if: matrix.suite != 'application'
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          IMAGE_TAG: ${{ matrix.image-tag }}
         run: |
           for target in gateway configuration broker certs simulator; do
-            docker build -f deploy/dotnet/Dockerfile --target "$target" -t "iot-dotnet-$target:local" .
+            docker build --platform "$PLATFORM" -f deploy/dotnet/Dockerfile --target "$target" -t "iot-dotnet-$target:$IMAGE_TAG" .
           done
       - name: Edge stack integration checks
+        if: matrix.suite != 'application'
+        env:
+          EDGE_TEST_PLATFORM: ${{ matrix.platform }}
+          EDGE_IMAGE_TAG: ${{ matrix.image-tag }}
         run: node --test tests/deployment/stack.test.cjs
-      - uses: docker/setup-qemu-action@v4
-      - name: ARM64 images and integration checks
-        run: |
-          for target in gateway configuration broker certs simulator; do
-            docker build --platform linux/arm64 -f deploy/dotnet/Dockerfile --target "$target" -t "iot-dotnet-$target:local-arm64" .
-          done
-          EDGE_TEST_PLATFORM=linux/arm64 EDGE_IMAGE_TAG=local-arm64 node --test tests/deployment/stack.test.cjs
   publish:
     name: publish (${{ matrix.target }}, iot-dotnet-${{ matrix.target }})
     needs: test
