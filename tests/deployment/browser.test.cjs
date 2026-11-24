@@ -29,9 +29,15 @@ test('registry page creates and edits records without losing metric identity', {
     const context = await browser.newContext({ httpCredentials: { username: 'admin', password }, viewport: { width: 1400, height: 1000 } });
     const page = await context.newPage(), errors = []; page.on('pageerror', error => errors.push(error.message));
     await page.goto(baseURL + '/register'); await page.getByRole('heading', { name: 'Device registry' }).waitFor();
+    const auth = 'Basic ' + Buffer.from('admin:' + password).toString('base64');
+    const read = route => fetch(baseURL + route, { headers: { Authorization: auth } }).then(r => r.json());
     await page.getByRole('button', { name: 'Add interface', exact: true }).click();
+    assert.equal(await page.getByRole('combobox', { name: 'Type', exact: true }).inputValue(), 'ModbusTcp');
+    assert.equal(await page.getByRole('combobox', { name: 'Type', exact: true }).locator('option[value="ModbusRtu"]').isDisabled(), true);
+    assert.equal(await page.getByLabel('TCP port', { exact: true }).inputValue(), '502');
     await page.getByLabel('Interface ID', { exact: true }).fill('ui-tcp');
-    await page.getByLabel('Host reachable from the gateway VM').fill('192.168.10.50');
+    await page.getByLabel('Host', { exact: true }).fill('192.168.10.50');
+    await page.screenshot({ path: path.join(logs, 'interface-form-desktop.png') });
     await page.getByRole('button', { name: 'Save', exact: true }).click();
     await page.getByText('192.168.10.50:502', { exact: true }).waitFor();
     await page.getByRole('button', { name: 'Add device', exact: true }).click();
@@ -41,9 +47,21 @@ test('registry page creates and edits records without losing metric identity', {
     await page.getByLabel('Unit', { exact: true }).fill('°C');
     await page.getByRole('button', { name: 'Save', exact: true }).click();
     const row = page.locator('#devices tr').filter({ hasText: 'ui-meter-01' }); await row.waitFor();
-    const auth = 'Basic ' + Buffer.from('admin:' + password).toString('base64');
-    const read = route => fetch(baseURL + route, { headers: { Authorization: auth } }).then(r => r.json());
     const before = await read('/devices/ui-meter-01'); assert.ok(before.metrics[0].id);
+    const interfaceRow = page.locator('#interfaces tr').filter({ hasText: 'ui-tcp' });
+    await interfaceRow.getByRole('button', { name: 'Edit', exact: true }).click();
+    assert.equal(await page.getByLabel('Interface ID', { exact: true }).getAttribute('readonly'), '');
+    assert.equal(await page.getByLabel('Host', { exact: true }).inputValue(), '192.168.10.50');
+    await page.getByLabel('Host', { exact: true }).fill('192.168.10.51');
+    await page.getByLabel('TCP port', { exact: true }).fill('1502');
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await page.locator('#editor').waitFor({ state: 'hidden' });
+    assert.deepEqual((await read('/interfaces/ui-tcp')).settings, { host: '192.168.10.51', port: 1502 });
+    assert.equal((await read('/devices/ui-meter-01')).metrics[0].id, before.metrics[0].id);
+    await interfaceRow.getByRole('button', { name: 'Edit', exact: true }).click();
+    await page.getByLabel('Host', { exact: true }).fill('not-saved');
+    await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+    assert.equal((await read('/interfaces/ui-tcp')).settings.host, '192.168.10.51');
     assert.equal(await row.locator('img').count(), 0, 'description must be plain text');
     await row.getByRole('button', { name: 'Edit', exact: true }).click();
     await page.getByLabel('Name', { exact: true }).fill('Room temperature');
@@ -69,7 +87,7 @@ test('registry page creates and edits records without losing metric identity', {
     fs.writeFileSync(statusPath, JSON.stringify({ updatedAt: new Date(Date.now() - 20000), gatewayId: 'ui-edge-01' }));
     await row.getByText('Status unavailable', { exact: true }).waitFor();
     assert.deepEqual(errors, []);
-    console.log('PASS: Real browser CRUD, metric rename/identity, enable/disable, broker edit, safe text and basic fresh/stale device status.');
+    console.log('PASS: TCP interface create/shared edit/cancel, locked RTU, device CRUD, metric identity, broker edit, safe text and fresh/stale status.');
   } finally {
     if (browser) await browser.close();
     if (app.exitCode === null) { const ended = new Promise(resolve => app.once('exit', resolve)); app.kill(); await ended; }

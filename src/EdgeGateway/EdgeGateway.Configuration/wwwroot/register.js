@@ -76,9 +76,17 @@ function editDevice(existing) {
 function editInterface(existing) {
   if (existing && existing.type !== 'ModbusTcp') { notice('RTU configuration is retained; this gateway currently polls TCP interfaces.'); return; }
   let id, host, port;
-  openEditor(existing ? `Edit ${existing.id}` : 'Add TCP interface', fields => {
-    id = input(existing?.id); id.readOnly = Boolean(existing); host = input(existing?.settings.host); port = number(existing?.settings.port ?? 502, 1, 65535);
-    fields.append(label('Interface ID', id), label('Host reachable from the gateway VM', host), label('Port', port));
+  openEditor(existing ? `Edit ${existing.id}` : 'Add interface', fields => {
+    id = input(existing?.id); id.readOnly = Boolean(existing); id.placeholder = 'modsim-local';
+    const type = select(['ModbusTcp', 'ModbusRtu'], 'ModbusTcp');
+    type.querySelector('[value="ModbusRtu"]').disabled = true;
+    host = input(existing?.settings.host); port = number(existing?.settings.port ?? 502, 1, 65535);
+    const identity = node('div', undefined, 'grid'), settings = node('div', undefined, 'grid');
+    identity.append(label('Interface ID', id), label('Type', type));
+    settings.append(label('Host', host), label('TCP port', port));
+    const count = devices.filter(device => device.interfaceId === existing?.id).length;
+    fields.append(identity, settings, node('p', 'Use a host address reachable from this gateway. Modbus RTU is not available yet.', 'muted'),
+      node('p', `${count} registered device(s) use this interface. Changes apply on the next configuration refresh.`, 'muted'));
   }, () => api(existing ? '/interfaces/' + encodeURIComponent(existing.id) : '/interfaces', existing ? 'PUT' : 'POST', { id: id.value, type: 'ModbusTcp', settings: { host: host.value, port: +port.value } }));
 }
 function editBroker(existing) {
