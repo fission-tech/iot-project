@@ -10,6 +10,12 @@ public sealed class HistoryStore(string connectionString) : IAsyncDisposable
 {
     private readonly NpgsqlDataSource _source = NpgsqlDataSource.Create(connectionString);
 
+    public async Task CheckConnectionAsync(CancellationToken cancellationToken)
+    {
+        await using var command = _source.CreateCommand("SELECT 1");
+        await command.ExecuteScalarAsync(cancellationToken);
+    }
+
     // Applies the numbered scripts in Schema/ that have not run yet, then the retention and compression settings.
     public async Task MigrateAsync(HistorySettings settings, CancellationToken cancellationToken)
     {

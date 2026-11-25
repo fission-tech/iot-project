@@ -20,6 +20,11 @@ public sealed class HistorySettings
     // Device registry (configuration service) describing each metric: register area, data type, unit.
     // Empty: dashboards only know boolean vs numeric, from the births.
     public string ConfigUrl { get; init; } = "";
+    public string? ConfigUsername { get; init; }
+    public string ConfigPassword { get; init; } = "";
+    // Optional: request fresh definitions when attaching to an already running gateway.
+    public string RebirthTopic { get; init; } = "";
+    public string ReadinessPath { get; init; } = "";
     // Folder Grafana provisions dashboards from; the historian writes devices/<uid>.json there. Empty: no dashboards.
     public string DashboardDirectory { get; init; } = "";
     public int DashboardRefreshSeconds { get; init; } = 60;
@@ -31,6 +36,8 @@ public sealed class HistorySettings
         if (string.IsNullOrWhiteSpace(ClientId)) throw new InvalidOperationException("Historian:ClientId is required.");
         if (CompressAfterDays < 1 || RawRetentionDays <= CompressAfterDays || RollupRetentionDays < RawRetentionDays)
             throw new InvalidOperationException("Need 1 <= CompressAfterDays < RawRetentionDays <= RollupRetentionDays.");
+        if (RebirthTopic.Length > 0 && !System.Text.RegularExpressions.Regex.IsMatch(RebirthTopic, "^spBv1[.]0/[^/+#\\s]+/NCMD/[^/+#\\s]+$"))
+            throw new InvalidOperationException("Historian:RebirthTopic must name one Sparkplug node command topic.");
         if (DashboardRefreshSeconds < 5) throw new InvalidOperationException("Historian:DashboardRefreshSeconds must be at least 5.");
     }
 }

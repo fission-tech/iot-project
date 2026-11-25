@@ -15,4 +15,4 @@ datasources:
       timescaledb: true
       postgresVersion: 1700
     secureJsonData:
-      password: ${GRAFANA_DB_PASSWORD}
+      password: $GRAFANA_DB_PASSWORD

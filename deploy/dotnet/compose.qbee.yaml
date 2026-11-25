@@ -62,9 +62,64 @@ services:
       MANAGEMENT_PASSWORD: "{{DOTNET_MANAGEMENT_PASSWORD}}"
       GATEWAY_ID: "{{DOTNET_GATEWAY_ID}}"
     restart: unless-stopped
+  timescaledb:
+    image: ghcr.io/fission-tech/iot-dotnet-history-db:{{IMAGE_TAG}}
+    environment:
+      POSTGRES_DB: history
+      POSTGRES_USER: historian
+      POSTGRES_PASSWORD: "{{DOTNET_HISTORY_DB_PASSWORD}}"
+      GRAFANA_DB_PASSWORD: "{{DOTNET_GRAFANA_DB_PASSWORD}}"
+    volumes: [history-data:/var/lib/postgresql/data]
+    restart: unless-stopped
+  historian:
+    image: ghcr.io/fission-tech/iot-dotnet-historian:{{IMAGE_TAG}}
+    depends_on:
+      certs: {condition: service_completed_successfully}
+      mosquitto: {condition: service_started}
+      configuration: {condition: service_started}
+      timescaledb: {condition: service_healthy}
+    environment:
+      Historian__ConnectionString: Host=timescaledb;Database=history;Username=historian;Timeout=5
+      PGPASSWORD: "{{DOTNET_HISTORY_DB_PASSWORD}}"
+      Historian__ClientId: "historian-{{DOTNET_GATEWAY_ID}}"
+      Historian__Topic: "spBv1.0/{{DOTNET_SPARKPLUG_GROUP}}/#"
+      Historian__RebirthTopic: "spBv1.0/{{DOTNET_SPARKPLUG_GROUP}}/NCMD/{{DOTNET_GATEWAY_ID}}"
+      Historian__ConfigUrl: http://configuration:5300
+      Historian__ConfigUsername: admin
+      Historian__ConfigPassword: "{{DOTNET_MANAGEMENT_PASSWORD}}"
+      Historian__DashboardDirectory: /dashboards
+      Historian__ReadinessPath: /tmp/historian.ready
+      Mqtt__Host: mosquitto
+      Mqtt__Port: "8883"
+      Mqtt__UseTls: "true"
+      Mqtt__BrokerCertificatePath: /certs/broker.crt
+    volumes: [broker-public:/certs:ro, history-dashboards:/dashboards]
+    restart: unless-stopped
+  grafana:
+    image: ghcr.io/fission-tech/iot-dotnet-grafana:{{IMAGE_TAG}}
+    depends_on:
+      timescaledb: {condition: service_healthy}
+      # Initialize the shared dashboard volume with the historian's non-root ownership first.
+      historian: {condition: service_started}
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: "{{DOTNET_GRAFANA_ADMIN_PASSWORD}}"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/edge.json
+      HISTORY_DB: history
+      GRAFANA_DB_PASSWORD: "{{DOTNET_GRAFANA_DB_PASSWORD}}"
+    ports: ["127.0.0.1:{{DOTNET_GRAFANA_PORT}}:3000"]
+    volumes: [grafana-data:/var/lib/grafana, history-dashboards:/etc/grafana/generated:ro]
+    restart: unless-stopped
+
 volumes:
   broker-private:
   broker-public:
   mqtt-data:
   configuration-state:
   gateway-state:
+  history-data:
+  history-dashboards:
+  grafana-data:

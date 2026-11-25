@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Security.Cryptography.X509Certificates;
 using Google.Protobuf;
+using Org.Eclipse.Tahu.Protobuf;
 using Microsoft.Extensions.Logging;
 using MQTTnet;
 using MQTTnet.Formatter;
@@ -14,6 +15,7 @@ namespace EdgeGateway.Historian;
 public sealed class HistorianService(HistorianSettings settings, HistoryStore store, ILogger<HistorianService> log,
     Dashboards.DashboardGenerator? dashboards = null)
 {
+    private volatile bool _subscribed;
     public async Task RunAsync(CancellationToken cancellationToken)
     {
         await MigrateWithRetryAsync(cancellationToken);
@@ -21,6 +23,7 @@ public sealed class HistorianService(HistorianSettings settings, HistoryStore st
         var dashboardTask = dashboards?.RunAsync(cancellationToken) ?? Task.CompletedTask;
         using var client = new MqttClientFactory().CreateMqttClient();
         using var certificate = LoadCertificate();
+        var readiness = settings.Historian.ReadinessPath.Length > 0 ? ReportReadinessAsync(client, cancellationToken) : Task.CompletedTask;
         var writeFailed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         client.ApplicationMessageReceivedAsync += async args =>
         {
@@ -58,13 +61,21 @@ public sealed class HistorianService(HistorianSettings settings, HistoryStore st
             {
                 writeFailed = new(TaskCreationOptions.RunContinuationsAsynchronously);
                 var disconnected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-                Task OnDisconnected(MqttClientDisconnectedEventArgs _) { disconnected.TrySetResult(); return Task.CompletedTask; }
+                Task OnDisconnected(MqttClientDisconnectedEventArgs _) { _subscribed = false; disconnected.TrySetResult(); return Task.CompletedTask; }
                 client.DisconnectedAsync += OnDisconnected;
                 try
                 {
                     await client.ConnectAsync(Options(certificate), cancellationToken);
                     await client.SubscribeAsync(new MqttClientFactory().CreateSubscribeOptionsBuilder()
                         .WithTopicFilter(settings.Historian.Topic, MqttQualityOfServiceLevel.AtLeastOnce).Build(), cancellationToken);
+                    _subscribed = true;
+                    if (settings.Historian.RebirthTopic is { Length: > 0 } topic)
+                    {
+                        var command = new Payload { Timestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() };
+                        command.Metrics.Add(new Payload.Types.Metric { Name = "Node Control/Rebirth", Datatype = (uint)DataType.Boolean, BooleanValue = true });
+                        await client.PublishAsync(new MqttApplicationMessageBuilder().WithTopic(topic).WithPayload(command.ToByteArray())
+                            .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce).Build(), cancellationToken);
+                    }
                     log.LogInformation("Connected to {Host}:{Port}, storing {Topic}.", settings.Mqtt.Host, settings.Mqtt.Port, settings.Historian.Topic);
                     delay = TimeSpan.FromSeconds(settings.Mqtt.RetryDelaySeconds);
                     var ended = await Task.WhenAny(disconnected.Task, writeFailed.Task, Task.Delay(Timeout.Infinite, cancellationToken));
@@ -89,6 +100,34 @@ public sealed class HistorianService(HistorianSettings settings, HistoryStore st
         if (client.IsConnected)
             await client.DisconnectAsync(new MqttClientDisconnectOptionsBuilder().Build(), CancellationToken.None);
         await dashboardTask;
+        await readiness;
+    }
+
+    // A small local heartbeat, not a new HTTP service. No readings are required for an idle gateway to be ready.
+    private async Task ReportReadinessAsync(IMqttClient client, CancellationToken cancellationToken)
+    {
+        var path = settings.Historian.ReadinessPath;
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                try
+                {
+                    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    timeout.CancelAfter(TimeSpan.FromSeconds(5));
+                    if (!client.IsConnected || !_subscribed) File.Delete(path);
+                    else
+                    {
+                        await store.CheckConnectionAsync(timeout.Token);
+                        await File.WriteAllTextAsync(path, "ready", timeout.Token);
+                    }
+                }
+                catch (Exception) when (!cancellationToken.IsCancellationRequested) { File.Delete(path); }
+                await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        finally { File.Delete(path); }
     }
 
     // The database may still be starting (compose, server reboot): keep trying instead of exiting.

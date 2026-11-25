@@ -1,10 +1,10 @@
 name: .NET gateway CI
 on:
   pull_request:
-    paths: ["src/**", "schemas/**", "tests/**", "deploy/dotnet/**", "Directory.Build.props", "IoT.sln", ".dockerignore", ".github/workflows/dotnet-*.yml"]
+    paths: ["src/**", "grafana/**", "history/**", "schemas/**", "tests/**", "deploy/dotnet/**", "Directory.Build.props", "IoT.sln", ".dockerignore", ".github/workflows/dotnet-*.yml"]
   push:
-    branches: [main, feature/dotnet-qbee]
-    paths: ["src/**", "schemas/**", "tests/**", "deploy/dotnet/**", "Directory.Build.props", "IoT.sln", ".dockerignore", ".github/workflows/dotnet-*.yml"]
+    branches: [main, feature/dotnet-qbee, feature/dotnet-qbee-grafana]
+    paths: ["src/**", "grafana/**", "history/**", "schemas/**", "tests/**", "deploy/dotnet/**", "Directory.Build.props", "IoT.sln", ".dockerignore", ".github/workflows/dotnet-*.yml"]
   workflow_dispatch:
 permissions: {contents: read}
 concurrency:
@@ -34,10 +34,19 @@ jobs:
         with: {node-version: 22}
       - run: dotnet build IoT.sln -c Release --nologo
         if: matrix.suite == 'application'
+      - name: Start isolated history database for application checks
+        if: matrix.suite == 'application'
+        run: |
+          docker run -d --name historian-checks -p 127.0.0.1:5432:5432 -e POSTGRES_DB=history_checks -e POSTGRES_USER=historian -e POSTGRES_PASSWORD=ci-history-password timescale/timescaledb:2.31.2-pg17
+          for ((attempt=0; attempt<60; attempt++)); do
+            if docker exec historian-checks pg_isready -h 127.0.0.1 -U historian -d history_checks; then exit 0; fi
+            sleep 1
+          done
+          docker logs historian-checks; exit 1
       # IoT.Checks is an executable, not a dotnet test project.
       - run: dotnet tests/IoT.Checks/bin/Release/net8.0/IoT.Checks.dll
         if: matrix.suite == 'application'
-        env: {HISTORIAN_TEST_CONNECTION: ''}
+        env: {HISTORIAN_TEST_CONNECTION: 'Host=127.0.0.1;Database=history_checks;Username=historian;Password=ci-history-password'}
       - run: node --test tests/deployment/qbee.test.cjs
         if: matrix.suite == 'application'
       - name: Browser registry checks
@@ -56,7 +65,7 @@ jobs:
           PLATFORM: ${{ matrix.platform }}
           IMAGE_TAG: ${{ matrix.image-tag }}
         run: |
-          for target in gateway configuration broker certs simulator; do
+          for target in gateway configuration broker certs simulator historian history-db grafana; do
             docker build --platform "$PLATFORM" -f deploy/dotnet/Dockerfile --target "$target" -t "iot-dotnet-$target:$IMAGE_TAG" .
           done
       - name: Edge stack integration checks
@@ -65,6 +74,9 @@ jobs:
           EDGE_TEST_PLATFORM: ${{ matrix.platform }}
           EDGE_IMAGE_TAG: ${{ matrix.image-tag }}
         run: node --test tests/deployment/stack.test.cjs
+      - name: Remove isolated application-check database
+        if: always() && matrix.suite == 'application'
+        run: docker rm -f -v historian-checks
   publish:
     name: publish (${{ matrix.target }}, iot-dotnet-${{ matrix.target }})
     needs: test
@@ -74,7 +86,7 @@ jobs:
     permissions: {contents: read, packages: write}
     strategy:
       matrix:
-        target: [gateway, configuration, broker, certs, simulator]
+        target: [gateway, configuration, broker, certs, simulator, historian, history-db, grafana]
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-qemu-action@v4
@@ -98,7 +110,7 @@ jobs:
           cache-from: type=gha,scope=dotnet-${{ matrix.target }}
           cache-to: type=gha,scope=dotnet-${{ matrix.target }},mode=max
       - name: Scan application images
-        if: matrix.target == 'gateway' || matrix.target == 'configuration'
+        if: matrix.target == 'gateway' || matrix.target == 'configuration' || matrix.target == 'historian'
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ghcr.io/fission-tech/iot-dotnet-${{ matrix.target }}:${{ steps.version.outputs.tag }}
@@ -107,7 +119,7 @@ jobs:
           exit-code: '1'
   deploy-staging:
     needs: publish
-    if: github.event_name == 'push' && vars.DOTNET_QBEE_GROUP_ID != ''
+    if: github.event_name == 'push' && github.ref != 'refs/heads/feature/dotnet-qbee-grafana' && vars.DOTNET_QBEE_GROUP_ID != ''
     uses: ./.github/workflows/dotnet-deploy.yml
     with:
       ref: ${{ github.sha }}

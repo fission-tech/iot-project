@@ -27,7 +27,7 @@ try
     var settings = configuration.Get<HistorianSettings>() ?? new HistorianSettings();
     settings.Historian.Validate();
     await using var store = new HistoryStore(settings.Historian.ConnectionString);
-    using var registry = settings.Historian.ConfigUrl is { Length: > 0 } url ? new RegistryClient(url) : null;
+    using var registry = settings.Historian.ConfigUrl is { Length: > 0 } url ? new RegistryClient(url, settings.Historian.ConfigUsername, settings.Historian.ConfigPassword) : null;
     var dashboards = settings.Historian.DashboardDirectory is { Length: > 0 } directory
         ? new DashboardGenerator(store, registry, Path.GetFullPath(directory), TimeSpan.FromSeconds(settings.Historian.DashboardRefreshSeconds),
             loggers.CreateLogger<DashboardGenerator>())

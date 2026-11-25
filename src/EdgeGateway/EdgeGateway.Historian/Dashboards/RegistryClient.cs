@@ -5,9 +5,16 @@ namespace EdgeGateway.Historian.Dashboards;
 
 // Reads every registered device, enabled or not, from the configuration service. A disabled device is still in
 // the registry, so its dashboard is not marked removed.
-public sealed class RegistryClient(string configUrl) : IDisposable
+public sealed class RegistryClient : IDisposable
 {
-    private readonly HttpClient _http = new() { BaseAddress = new Uri(configUrl.TrimEnd('/') + "/"), Timeout = TimeSpan.FromSeconds(10) };
+    private readonly HttpClient _http;
+    public RegistryClient(string configUrl, string? username = null, string password = "")
+    {
+        _http = new() { BaseAddress = new Uri(configUrl.TrimEnd('/') + "/"), Timeout = TimeSpan.FromSeconds(10) };
+        if (username is not null)
+            _http.DefaultRequestHeaders.Authorization = new("Basic",
+                Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(username + ":" + password)));
+    }
 
     public async Task<(RegistryMetric[] Metrics, string[] Devices)> ReadAsync(CancellationToken cancellationToken)
     {

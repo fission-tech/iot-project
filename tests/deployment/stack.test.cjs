@@ -10,7 +10,7 @@ fs.mkdirSync(directory, { recursive: true });
 const compose = path.join(directory, project + '.yaml');
 let password = process.env.EDGE_TEST_PASSWORD ?? 'ci-env-password-123';
 const platform = process.env.EDGE_TEST_PLATFORM || 'linux/amd64';
-const params = { IMAGE_TAG: process.env.EDGE_IMAGE_TAG || 'local', DOTNET_GATEWAY_ID: 'ci-edge-01', DOTNET_SPARKPLUG_GROUP: 'ci-plant', DOTNET_MANAGEMENT_PASSWORD: password, DOTNET_API_PORT: '5300', DOTNET_MQTT_PORT: '8883', SIM_REPLICAS: '1' };
+const params = { IMAGE_TAG: process.env.EDGE_IMAGE_TAG || 'local', DOTNET_GATEWAY_ID: 'ci-edge-01', DOTNET_SPARKPLUG_GROUP: 'ci-plant', DOTNET_MANAGEMENT_PASSWORD: password, DOTNET_API_PORT: '5300', DOTNET_MQTT_PORT: '8883', DOTNET_GRAFANA_PORT: '3000', DOTNET_HISTORY_DB_PASSWORD: 'db;pa$ss\'"\\word', DOTNET_GRAFANA_DB_PASSWORD: 'reader;pa$ss\'"\\word', DOTNET_GRAFANA_ADMIN_PASSWORD: 'grafana$test-password', SIM_REPLICAS: '1' };
 let template = fs.readFileSync(path.join(root, 'deploy/dotnet/compose.qbee.yaml'), 'utf8');
 // Tests communicate inside Docker. No existing host port or application is touched.
 template = template.replace(/^\s*ports:.*\r?\n/gm, '\n').replaceAll('ghcr.io/fission-tech/', '');
@@ -18,7 +18,7 @@ template = template.replace(/^(\s*)image: (.+)$/gm, `$&\n$1platform: ${platform}
 function writeCompose() {
   fs.writeFileSync(compose, template.replace(/\{\{(\w+)\}\}/g, (_, key) => {
     if (!(key in params)) throw new Error('Unknown parameter ' + key);
-    return params[key];
+    return key.endsWith("PASSWORD") ? JSON.stringify(params[key]).slice(1, -1).replace(/\$/g, () => "$$") : params[key];
   }));
 }
 writeCompose();
@@ -41,11 +41,55 @@ async function wait(reason, predicate, timeout = 65000) {
 // Operator diagnostics stay in the worker console/file, not the registration API.
 const status = () => JSON.parse(dc('exec', '-T', 'gateway', 'cat', '/state/status.json'));
 const sample = () => status().devices?.find(d => d.deviceId === 'ci-edge-01-pump');
+const sql = query => dc('exec', '-T', 'timescaledb', 'psql', '-U', 'historian', '-d', 'history', '-Atc', query);
+const lastStored = () => Number(sql("SELECT coalesce(max(device_seq),0) FROM readings WHERE device='ci-edge-01-pump'"));
+function grafana(route, data, authenticated = true) {
+  const args = ['exec', '-T', 'configuration', 'curl', '--silent', '--show-error', '--fail-with-body', '--max-time', '10'];
+  if (authenticated) args.push('-u', 'admin:' + params.DOTNET_GRAFANA_ADMIN_PASSWORD);
+  if (data) args.push('-H', 'Content-Type: application/json', '--data', JSON.stringify(data));
+  return JSON.parse(dc(...args, 'http://grafana:3000' + route));
+}
+async function checkHistory() {
+  await wait('history readings', () => lastStored() > 0);
+  await wait('authenticated registry metadata', () => sql("SELECT unit FROM metric_catalog WHERE device='ci-edge-01-pump' AND name='Temperature'") === '°C');
+  await wait('provisioned datasource', () => grafana('/api/datasources/uid/history/health').status === 'OK');
+  const uid = sql("SELECT uid FROM device_catalog WHERE device='ci-edge-01-pump'");
+  await wait('generated device dashboard', () => grafana('/api/search?type=dash-db').some(d => d.uid === uid));
+  const query = grafana('/api/ds/query', { from: String(Date.now() - 3600000), to: String(Date.now()), queries: [{ refId: 'A', datasource: { uid: 'history', type: 'grafana-postgresql-datasource' }, format: 'table', rawSql: "SELECT value FROM readings WHERE device='ci-edge-01-pump' AND value IS NOT NULL LIMIT 1" }] });
+  assert.ok(query.results.A.frames?.some(frame => frame.data.values.some(column => column.length)), JSON.stringify(query));
+  assert.throws(() => grafana('/api/search', null, false), /401|failed|Command/);
+  assert.throws(() => dc('exec', '-T', '-e', 'PGPASSWORD=' + params.DOTNET_GRAFANA_DB_PASSWORD, 'timescaledb', 'psql', '-h', '127.0.0.1', '-U', 'grafana_reader', '-d', 'history', '-v', 'ON_ERROR_STOP=1', '-c', 'DELETE FROM readings'), /Command|permission denied/);
+  return uid;
+}
 test('containerized edge stack: TLS, API, polling, outage buffering and persistent restart', { timeout: platform === 'linux/arm64' ? 600000 : 300000 }, async t => {
   try {
+    dc('up', '-d', 'gateway', 'modbus-sim', 'timescaledb');
+    await wait('gateway running before first historian subscription', () => sample()?.lastSeq > 1);
     dc('up', '-d', '--wait', '--wait-timeout', '180');
     await wait('live Modbus data', () => sample()?.lastValues?.Temperature?.number > 0);
     console.log('PASS: Fresh Docker volumes, non-root services, authenticated registry and all Modbus areas.');
+    const dashboardUid = await checkHistory();
+    console.log('PASS: Late historian startup obtains fresh births; authenticated metric metadata, persisted readings, automatic dashboards, Grafana SQL queries and read-only access.');
+    const historyBefore = lastStored();
+    dc('stop', 'historian');
+    await wait('gateway continues while historian stopped', () => sample()?.lastSeq >= historyBefore + 3);
+    const duringHistoryStop = sample().lastSeq;
+    dc('start', 'historian');
+    await wait('persistent subscriber recovers queued readings', () => lastStored() > duringHistoryStop);
+    assert.equal(Number(sql(`SELECT count(DISTINCT device_seq) FROM readings WHERE device='ci-edge-01-pump' AND device_seq BETWEEN ${historyBefore} AND ${duringHistoryStop}`)), duringHistoryStop - historyBefore + 1);
+    const databaseBefore = lastStored();
+    dc('stop', 'timescaledb');
+    await wait('gateway continues while database stopped', () => sample()?.lastSeq >= databaseBefore + 3);
+    const duringDbStop = sample().lastSeq;
+    dc('start', 'timescaledb');
+    await wait('database reconnect and message redelivery', () => lastStored() > duringDbStop);
+    assert.equal(Number(sql(`SELECT count(DISTINCT device_seq) FROM readings WHERE device='ci-edge-01-pump' AND device_seq BETWEEN ${databaseBefore} AND ${duringDbStop}`)), duringDbStop - databaseBefore + 1);
+    dc('stop', 'grafana');
+    const withoutGrafana = lastStored();
+    await wait('history continues while Grafana stopped', () => lastStored() > withoutGrafana);
+    dc('start', 'grafana');
+    await wait('Grafana returns with its datasource and dashboards', () => grafana('/api/search').some(d => d.uid === dashboardUid));
+    console.log('PASS: Historian, database and Grafana outages recover; gateway keeps polling and queued sample sequences have no gaps.');
     assert.throws(() => curl('/devices', { auth: false }), /failed|401|Command/);
     assert.throws(() => curl('/interfaces', { method: 'POST', data: {}, extra: ['-H', 'Origin: https://untrusted.example'] }));
     assert.match(curl('/register', { json: false }), /Device registry/);
@@ -53,7 +97,7 @@ test('containerized edge stack: TLS, API, polling, outage buffering and persiste
     const certificate = curl('/broker-certificate', { json: false });
     assert.match(certificate, /BEGIN CERTIFICATE/); assert.ok(!certificate.includes('PRIVATE KEY'));
     assert.match(dc('exec', '-T', 'mosquitto', 'mosquitto_sub', '-h', 'localhost', '-p', '8883', '--cafile', '/mosquitto/public/broker.crt', '-t', 'spBv1.0/ci-plant/DDATA/#', '-C', '1', '-W', '20', '-F', '%t'), /DDATA\/ci-edge-01/);
-    // Check the Node TLS verification path used by Electron MQTT clients as well as the .NET publisher.
+    // Check Node TLS verification in addition to the .NET publisher. Electron has separate certificate compatibility behavior.
     assert.equal(docker('run', '--rm', '--network', project + '_default', '--mount',
       `type=volume,source=${project}_broker-public,target=/certs,readonly`, 'node:22-alpine', 'node', '-e',
       "const s=require('tls').connect({host:'mosquitto',port:8883,ca:require('fs').readFileSync('/certs/broker.crt'),rejectUnauthorized:true},()=>{console.log(s.authorized?'verified':'refused');s.end();});s.on('error',e=>{console.error(e.message);process.exitCode=1;});s.setTimeout(5000,()=>s.destroy(new Error('timeout')));"), 'verified');
@@ -95,13 +139,16 @@ test('containerized edge stack: TLS, API, polling, outage buffering and persiste
     assert.deepEqual(curl('/device-status').devices, [], 'stopped worker must not report live devices');
     dc('start', 'gateway');
     await wait('worker returns', () => curl('/device-status').devices.length && sample()?.lastSeq > beforeCache);
+    const storedBeforeRecreate = sql("SELECT count(*) FROM readings");
     dc('down'); dc('up', '-d', '--wait', '--wait-timeout', '180');
     await wait('whole stack restart', () => sample()?.lastSeq > beforeCache);
     assert.equal(curl('/devices/' + device.id).description, device.description);
     assert.equal(curl('/devices/' + device.id).metrics[0].id, metricId);
     assert.equal(curl('/brokers/local').keepAliveSeconds, 45);
     assert.equal(curl('/broker-certificate', { json: false }), certificate, 'restart changed trusted certificate');
-    console.log('PASS: Stale status detection and whole-stack recreation preserve data and certificates.');
+    assert.ok(Number(sql("SELECT count(*) FROM readings")) >= Number(storedBeforeRecreate));
+    assert.equal(await checkHistory(), dashboardUid);
+    console.log('PASS: Whole-stack recreation preserves registry, metric identity, certificates, history and Grafana dashboards.');
     for (const chosenPassword of ['x', '']) {
       const previous = (await wait('polling before password rotation', sample)).lastSeq;
       password = chosenPassword; params.DOTNET_MANAGEMENT_PASSWORD = password; writeCompose();
@@ -112,7 +159,10 @@ test('containerized edge stack: TLS, API, polling, outage buffering and persiste
     }
     console.log('PASS: One-character and empty password rotations keep authentication, polling, MQTT and saved device identity.');
   } catch (error) {
-    console.error(dc('logs', '--no-color', '--tail', '60')); throw error;
+    console.error(dc('logs', '--no-color', '--tail', '60'));
+    const grafanaId = dc('ps', '-aq', 'grafana');
+    if (grafanaId) console.error(docker('inspect', '--format', '{{json .State}}', grafanaId));
+    throw error;
   } finally {
     dc('down', '-v', '--remove-orphans'); fs.unlinkSync(compose);
   }

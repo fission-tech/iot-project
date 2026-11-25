@@ -19,12 +19,17 @@ test('qbee template covers all parameters, isolates .NET project and does not de
   assert.doesNotMatch(template, /PasswordFile|MANAGEMENT_PASSWORD_FILE|management-password/);
 });
 test('all .NET services must run the requested version; worker must be healthy', () => {
-  const items = ['gateway', 'configuration', 'broker', 'simulator'].map(service => ({ image: `ghcr.io/fission-tech/iot-dotnet-${service}:sha-abc`, status: 'Up 1 minute (healthy)' }));
+  const items = ['gateway', 'configuration', 'broker', 'historian', 'history-db', 'grafana', 'simulator'].map(service => ({ image: `ghcr.io/fission-tech/iot-dotnet-${service}:sha-abc`, status: 'Up 1 minute (healthy)' }));
   assert.equal(deviceState({ docker_containers: { items } }, 'sha-abc', true).done, true);
   items[0].status = 'Up 1 minute (unhealthy)'; assert.equal(deviceState({ docker_containers: { items } }, 'sha-abc').done, false);
   items[0].status = 'Up 1 minute (healthy)'; items[1].image = items[1].image.replace('sha-abc', 'old');
   assert.equal(deviceState({ docker_containers: { items } }, 'sha-abc').done, false);
   assert.equal(deviceState(null, 'sha-abc').done, false);
+  for (const service of ['historian', 'history-db', 'grafana']) {
+    const complete = ['gateway', 'configuration', 'broker', 'historian', 'history-db', 'grafana'].map(name => ({ image: `ghcr.io/fission-tech/iot-dotnet-${name}:sha-abc`, status: 'Up 1 minute (healthy)' }));
+    complete.find(item => item.image.includes(`iot-dotnet-${service}:`)).status = 'Up 1 minute (unhealthy)';
+    assert.equal(deviceState({ docker_containers: { items: complete } }, 'sha-abc').done, false);
+  }
   assert.deepEqual(findDevices({ type: 'group', nodes: [{ type: 'device', node_id: 'a' }, { type: 'group', nodes: [{ type: 'device', node_id: 'b' }] }] }), ['a', 'b']);
 });
 test('empty group fails before upload or commit', async () => {
@@ -54,7 +59,7 @@ test('rollout uploads and commits the version, then waits for every device in ne
     else if (req.url === '/api/v2/commit') committed = JSON.parse(body);
     else if (req.url.includes('/inventoryreport/')) {
       const id = req.url.split('/').at(-1), count = (reports.get(id) || 0) + 1; reports.set(id, count);
-      result = { docker_containers: { items: ['gateway', 'configuration', 'broker', 'simulator'].map(service => ({
+      result = { docker_containers: { items: ['gateway', 'configuration', 'broker', 'historian', 'history-db', 'grafana', 'simulator'].map(service => ({
         image: `ghcr.io/fission-tech/iot-dotnet-${service}:${count === 1 ? 'old' : 'sha-abc'}`, status: 'Up 1 minute (healthy)' })) } };
     }
     res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(result));
@@ -98,7 +103,7 @@ for (const scenario of [
         else if (req.url === '/api/v2/commit') commits++;
         else if (req.url.includes('/inventoryreport/')) {
           res.statusCode = scenario.codes[Math.min(inventories++, scenario.codes.length - 1)];
-          result = res.statusCode === 200 ? { docker_containers: { items: ['gateway', 'configuration', 'broker'].map(service => ({
+          result = res.statusCode === 200 ? { docker_containers: { items: ['gateway', 'configuration', 'broker', 'historian', 'history-db', 'grafana'].map(service => ({
             image: `ghcr.io/fission-tech/iot-dotnet-${service}:${inventories >= scenario.codes.length ? 'sha-abc' : 'old'}`,
             status: 'Up 1 minute (healthy)' })) } } : { error: 'Do not echo account-password registry-secret session-token-' + logins };
         }

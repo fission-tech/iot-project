@@ -4,7 +4,7 @@ const path = require('node:path');
 const PROJECT = 'iot-dotnet';
 const DIRECTORY = '/iot-dotnet/';
 const IMAGE_PREFIX = 'ghcr.io/fission-tech/iot-dotnet-';
-const parameters = ['DOTNET_GATEWAY_ID', 'DOTNET_SPARKPLUG_GROUP', 'DOTNET_MANAGEMENT_PASSWORD', 'DOTNET_API_PORT', 'DOTNET_MQTT_PORT'];
+const parameters = ['DOTNET_GATEWAY_ID', 'DOTNET_SPARKPLUG_GROUP', 'DOTNET_MANAGEMENT_PASSWORD', 'DOTNET_API_PORT', 'DOTNET_MQTT_PORT', 'DOTNET_GRAFANA_PORT', 'DOTNET_HISTORY_DB_PASSWORD', 'DOTNET_GRAFANA_DB_PASSWORD', 'DOTNET_GRAFANA_ADMIN_PASSWORD'];
 function buildCommit({ group, tag, registryUser, registryToken, simulator = false }) {
   return {
     message: `Deploy .NET gateway ${tag}`,
@@ -22,10 +22,10 @@ function findDevices(node) {
 }
 function deviceState(report, tag, simulator = false) {
   const containers = report?.docker_containers?.items || [];
-  const services = ['gateway', 'configuration', 'broker', ...(simulator ? ['simulator'] : [])];
+  const services = ['gateway', 'configuration', 'broker', 'historian', 'history-db', 'grafana', ...(simulator ? ['simulator'] : [])];
   const states = services.map(service => {
     const item = containers.find(c => c.image === `${IMAGE_PREFIX}${service}:${tag}`);
-    const healthy = service === 'gateway' || service === 'configuration';
+    const healthy = ['gateway', 'configuration', 'historian', 'history-db', 'grafana'].includes(service);
     const done = Boolean(item && (healthy ? /\(healthy\)/.test(item.status || '') : /^Up\b/.test(item.status || '')));
     return { done, detail: `${service}: ${item?.status || 'version not running'}` };
   });

@@ -2,7 +2,7 @@
 
 The initial PoC keeps .NET 8 and the existing Sparkplug B implementation. One qbee device represents one Linux edge computer (an Ubuntu VM for the PoC), with one independent Compose project. More computers use the same images and their own gateway identity and persistent volumes. Multiple Modbus devices are registered inside each gateway; they are not additional qbee devices.
 
-The continuous services are `configuration` (registry API and `/register` page), `gateway` (polling, SQLite outbox and Sparkplug publishing), and `mosquitto` (TLS broker). `certs` initializes certificates once and exits. `modbus-sim` is optional for staging. Historian, Grafana, the downstream API and the demo launcher are not deployed.
+The continuous services are `configuration` (registry API and `/register` page), `gateway` (polling, SQLite outbox and Sparkplug publishing), `mosquitto` (TLS broker), `historian`, `timescaledb` and `grafana`. `certs` initializes certificates once and exits. `modbus-sim` is optional for staging. The downstream API and demo launcher are not deployed. See the Grafana/history setup below for its additional qbee secrets.
 
 ## Prepare an edge computer
 
@@ -82,7 +82,7 @@ node --test tests/deployment/qbee.test.cjs
 
 For the real-browser registry check, publish the configuration service to `logs/dotnet-qbee/browser-app`, then run `npm ci`, `npx playwright install chromium` and `npm test` from `tests/deployment`. The test starts/stops its own temporary local API. Playwright is a test-only dependency; it is not shipped in any edge image.
 
-Build the five Docker targets (`gateway`, `configuration`, `broker`, `certs`, `simulator`) from `deploy/dotnet/Dockerfile`, tagging each `iot-dotnet-<target>:local`, then run:
+Build the eight Docker targets (`gateway`, `configuration`, `broker`, `certs`, `simulator`, `historian`, `history-db`, `grafana`) from `deploy/dotnet/Dockerfile`, tagging each `iot-dotnet-<target>:local`, then run:
 
 ```sh
 node --test tests/deployment/stack.test.cjs
@@ -90,4 +90,29 @@ node --test tests/deployment/stack.test.cjs
 
 For ARM64, build each target with `--platform linux/arm64` and tag `iot-dotnet-<target>:local-arm64`, then run the same test with `EDGE_TEST_PLATFORM=linux/arm64` and `EDGE_IMAGE_TAG=local-arm64` environment variables. The builder needs ARM64 emulation or a native ARM64 host. The SDK builds on the build host and publishes for the target architecture, including the matching native SQLite assets.
 
-The integration test creates an isolated Compose project without published host ports and removes only its own containers/volumes when finished. It checks authenticated APIs, strict .NET/Node TLS verification, actual Modbus polling and Sparkplug topics, buffered outage recovery, cached startup, stale device status, persistent metric IDs/sequences and whole-stack recreation. The Node TLS probe runs in a disposable `node:22-alpine` test container; it is not deployed to qbee. The existing Historian database checks require `HISTORIAN_TEST_CONNECTION`; they are unrelated to the deployed edge stack.
+The integration test creates an isolated Compose project without published host ports and removes only its own containers/volumes when finished. It checks authenticated APIs, strict .NET/Node TLS verification, actual Modbus polling and Sparkplug topics, buffered outage recovery, cached startup, stale device status, persistent metric IDs/sequences and whole-stack recreation. The Node TLS probe runs in a disposable `node:22-alpine` test container; it is not deployed to qbee. The Historian database checks require `HISTORIAN_TEST_CONNECTION` pointing at a disposable TimescaleDB test database: they drop/recreate history tables. CI uses its own temporary database, never a deployed database.
+
+## Grafana and history
+
+The Grafana branch builds/tests/publishes the eight image targets but does not auto-deploy to the existing demo group. After checks and qbee setup, explicitly run `.NET gateway deploy` with this branch's exact commit and matching published tag. Keep the same `iot-dotnet` project and existing volumes. The previous branch/worktree remains the gateway-only demo.
+
+Three continuous services are added: `historian` (Sparkplug history and generated dashboards), `timescaledb` (storage), and `grafana` (visualization). With the optional simulator there are seven running containers plus the successful one-shot `certs` container.
+
+Add these qbee parameters before the first history rollout:
+
+| Parameter | Value | Kind |
+|---|---|---|
+| `DOTNET_GRAFANA_PORT` | `3000`, or another free VM loopback port | Parameter |
+| `DOTNET_HISTORY_DB_PASSWORD` | Non-empty database password | Secret |
+| `DOTNET_GRAFANA_DB_PASSWORD` | Separate non-empty read-only database password | Secret |
+| `DOTNET_GRAFANA_ADMIN_PASSWORD` | Separate Grafana admin password | Secret |
+
+Reuse existing GitHub credentials and `DOTNET_QBEE_GROUP_ID`. The management password also authenticates the Historian's registry requests. The qbee YAML escaping requirements above still apply. The historian passes the database password as `PGPASSWORD`, so semicolons do not change connection-string settings. Grafana provisioning uses `$GRAFANA_DB_PASSWORD` to avoid double expansion of dollar signs.
+
+Historian subscribes to the local broker for this Sparkplug group and requests fresh definitions using the gateway's existing NCMD Rebirth support. It stores measurement timestamps and acknowledges messages after database commit. Offline queuing is bounded by `max_queued_messages`; it is not unlimited storage. Readings acknowledged before its first subscription cannot be reconstructed. If a gateway is assigned an external broker, explicitly configure the historian for that broker too; it does not automatically follow registry broker assignments.
+
+Named volumes `history-data`, `history-dashboards` and `grafana-data` preserve history, generated dashboards and Grafana settings. Historian owns the dashboard volume; Grafana mounts it read-only. Grafana's database account only has SELECT access. The database has no published host port. Grafana binds only to VM loopback: use a qbee tunnel such as `15300:localhost:5300,13000:localhost:3000`, then open `http://localhost:13000`. Sign in as `admin` with the Grafana password, separate from the registry password. Existing certificate behavior is unchanged.
+
+Database users and the Grafana admin account are initialized on first start. Changing environment parameters later does not rotate stored account passwords automatically. Rotate accounts deliberately and update clients; never delete volumes to change passwords. Back up history with `pg_dump` to storage outside the VM. Keep PostgreSQL major version 17; test extension/version upgrades before rollout. Existing history retention/compression policies remain unchanged.
+
+Rollout checks require the requested version and healthy gateway/configuration/historian/database/Grafana, plus a running broker/simulator. Historian readiness is a local heartbeat after MQTT subscription and database connectivity, with no new HTTP service. Gateway polling does not depend on historian/Grafana readiness. Measure VM RAM/disk at the expected load; the small PoC VM may require additional RAM.

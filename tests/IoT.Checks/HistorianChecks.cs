@@ -20,6 +20,7 @@ internal static class HistorianChecks
         CheckMapping();
         CheckStatements();
         CheckDeviceDashboards();
+        await CheckRegistryCredentialsAsync();
         var database = Environment.GetEnvironmentVariable("HISTORIAN_TEST_CONNECTION");
         if (string.IsNullOrWhiteSpace(database))
         {
@@ -28,6 +29,44 @@ internal static class HistorianChecks
         }
         await CheckDatabaseAsync(database);
         Console.WriteLine("PASS: Historian mapping and TimescaleDB storage: schema migration is repeatable, duplicates and redelivery are skipped, late readings keep their time.");
+    }
+
+    private static async Task CheckRegistryCredentialsAsync()
+    {
+        foreach (var credentials in new (string? User, string Password)[] { (null, ""), ("admin", ""), ("operator", "quotes\";:$\u96ea") })
+        {
+            var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+            listener.Start();
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            try
+            {
+                var server = Task.Run(async () =>
+                {
+                    using var socket = await listener.AcceptTcpClientAsync(timeout.Token);
+                    using var stream = socket.GetStream();
+                    using var reader = new StreamReader(stream, leaveOpen: true);
+                    string? authorization = null;
+                    while (await reader.ReadLineAsync(timeout.Token) is { Length: > 0 } line)
+                        if (line.StartsWith("Authorization:", StringComparison.OrdinalIgnoreCase)) authorization = line[14..].Trim();
+                    await stream.WriteAsync("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]"u8.ToArray(), timeout.Token);
+                    return authorization;
+                }, timeout.Token);
+                var port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+                using var registry = new RegistryClient($"http://127.0.0.1:{port}", credentials.User, credentials.Password);
+                var result = await registry.ReadAsync(timeout.Token);
+                Check(result.Devices.Length == 0, "Registry response changed.");
+                var expected = credentials.User is null ? null : "Basic " + Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(credentials.User + ":" + credentials.Password));
+                Check(await server == expected, "Registry Basic authentication changed or broke native anonymous access.");
+            }
+            finally { listener.Stop(); }
+        }
+        new HistorySettings { ConnectionString = "Host=localhost", RebirthTopic = "spBv1.0/factory-a/NCMD/edge-01" }.Validate();
+        foreach (var topic in new[] { "spBv1.0/+/NCMD/edge-01", "spBv1.0/factory-a/NCMD/#", "spBv1.0/a b/NCMD/edge" })
+        {
+            try { new HistorySettings { ConnectionString = "Host=localhost", RebirthTopic = topic }.Validate(); throw new Exception("Historian: unsafe rebirth topic accepted."); }
+            catch (InvalidOperationException) { }
+        }
+        Console.WriteLine("PASS: Authenticated/native registry access, exact UTF-8 passwords and one-gateway rebirth topic validation.");
     }
 
     private static byte[] Reading(DateTimeOffset at, ulong deviceSeq, bool historical = false, string? quality = null) =>
