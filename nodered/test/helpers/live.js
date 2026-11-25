@@ -7,6 +7,8 @@ const mqtt = require("mqtt");
 const nodeRedUrl = process.env.NODE_RED_URL || "http://127.0.0.1:1880";
 const mqttUrl = process.env.MQTT_URL || "mqtts://127.0.0.1:8883";
 const mqttCa = process.env.MQTT_CA || path.join(__dirname, "..", "..", "..", "broker", "certs", "broker.crt");
+// The broker's read-only login (viewer); empty for a broker without logins.
+const mqttLogin = process.env.MQTT_USERNAME ? { username: process.env.MQTT_USERNAME, password: process.env.MQTT_PASSWORD } : {};
 
 // Where Node-RED reaches the test servers this suite starts. "auto" is this container's own address in Docker,
 // because `docker compose run` does not register the service name.
@@ -85,7 +87,7 @@ function device(id, port, unitId, metrics, extra = {}) {
 // Collects every telemetry message so tests can wait for one that matches.
 async function telemetry() {
     const ca = fs.readFileSync(mqttCa);
-    const client = await mqtt.connectAsync(mqttUrl, { ca, clientId: "nodered-e2e-" + process.pid, reconnectPeriod: 0 });
+    const client = await mqtt.connectAsync(mqttUrl, { ca, clientId: "nodered-e2e-" + process.pid, reconnectPeriod: 0, ...mqttLogin });
     const messages = [];
     client.on("message", (topic, raw) => {
         try { messages.push({ topic, payload: JSON.parse(raw.toString()), receivedAt: Date.now() }); } catch { }

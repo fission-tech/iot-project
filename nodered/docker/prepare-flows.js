@@ -27,7 +27,7 @@ for (const [tabId, values] of Object.entries(containerEnv)) {
 // Set per device when the container starts. A tab variable of type "env" named after itself reads the
 // process environment; the Dockerfile gives each one a default.
 const fromEnvironment = {
-    tab_modbus_mqtt: ["GATEWAY_ID", "BROKER_ID", "MQTT_HOST", "MQTT_PORT"],
+    tab_modbus_mqtt: ["GATEWAY_ID", "BROKER_ID", "MQTT_HOST", "MQTT_PORT", "MQTT_USERNAME", "MQTT_PASSWORD"],
     f937eaa01d565cc0: ["SEED_BROKER_HOST"]
 };
 for (const [tabId, names] of Object.entries(fromEnvironment)) {

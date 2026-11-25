@@ -23,6 +23,8 @@ ENV GATEWAY_ID=nodered-gateway-01 \
     BROKER_ID=local \
     MQTT_HOST=mosquitto \
     MQTT_PORT=8883 \
+    MQTT_USERNAME="" \
+    MQTT_PASSWORD="" \
     SEED_BROKER_HOST=mosquitto
 # Databases and the certificate cache; mounted as a volume so they survive rebuilds.
 VOLUME /data/state
@@ -30,6 +32,12 @@ EXPOSE 1880
 
 FROM eclipse-mosquitto:2.1.2-alpine AS broker
 COPY docker/mosquitto.conf /mosquitto/config/mosquitto.conf
+COPY docker/broker-start.sh /broker-start.sh
+RUN sed -i 's/\r$//' /broker-start.sh
+# Set them per device: the gateway's password is required, the viewer's optional. See broker-start.sh.
+ENV MQTT_GATEWAY_PASSWORD="" \
+    MQTT_VIEWER_PASSWORD=""
+CMD ["sh", "/broker-start.sh"]
 
 FROM alpine:3.20 AS certs
 RUN apk add --no-cache openssl

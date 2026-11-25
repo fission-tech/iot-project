@@ -21,6 +21,10 @@ services:
     depends_on:
       certs:
         condition: service_completed_successfully
+    # Local-only passwords; override them in .env. MQTTX logs in as viewer to read, the gateway as gateway.
+    environment:
+      MQTT_GATEWAY_PASSWORD: ${MQTT_GATEWAY_PASSWORD:-local-gateway}
+      MQTT_VIEWER_PASSWORD: ${MQTT_VIEWER_PASSWORD:-local-viewer}
     ports:
       - "127.0.0.1:${MQTT_PORT:-8883}:8883"
     volumes:
@@ -38,6 +42,9 @@ services:
         condition: service_completed_successfully
       mosquitto:
         condition: service_started
+    environment:
+      MQTT_USERNAME: gateway
+      MQTT_PASSWORD: ${MQTT_GATEWAY_PASSWORD:-local-gateway}
     ports:
       - "127.0.0.1:${NODE_RED_PORT:-1880}:1880"
     volumes:
@@ -76,6 +83,8 @@ services:
       NODE_RED_URL: http://nodered:1880
       MQTT_URL: mqtts://mosquitto:8883
       MQTT_CA: /certs/broker.crt
+      MQTT_USERNAME: viewer
+      MQTT_PASSWORD: ${MQTT_VIEWER_PASSWORD:-local-viewer}
       GATEWAY_DB: /state/gateway.db
       # Test devices and the test broker run in this container; Node-RED reaches them at its address.
       E2E_HOST: auto

@@ -20,7 +20,7 @@ docker compose up -d --build          # after pulling changes to flows.json or t
 | Device and broker page | http://127.0.0.1:1880/register |
 | Node-RED editor | http://127.0.0.1:1880 |
 | Gateway and device status | http://127.0.0.1:1880/api/gateway/status |
-| MQTT broker (TLS) | `mqtts://127.0.0.1:8883`. Trust `nodered/state/docker/certs/broker.crt` in MQTTX. |
+| MQTT broker (TLS) | `mqtts://127.0.0.1:8883`, user `viewer`, password `local-viewer`. Trust `nodered/state/docker/certs/broker.crt` in MQTTX. |
 
 If these ports are taken, set others before starting, for example `NODE_RED_PORT=1890` and `MQTT_PORT=8893` in a `.env` file next to `compose.yaml`. The .NET demo's broker also uses 8883, and a Node-RED running on this machine uses 1880.
 
@@ -72,6 +72,7 @@ These are read from the container's environment when it starts, so each gateway 
 | `BROKER_ID` | `local` | The registry broker used when the gateway has no assignment |
 | `MQTT_HOST`, `MQTT_PORT` | `mosquitto`, `8883` | The broker used until the registry names one |
 | `SEED_BROKER_HOST` | `mosquitto` | Host of the `local` broker written when the registry is first created |
+| `MQTT_USERNAME`, `MQTT_PASSWORD` | not set | The gateway's login for the broker at `MQTT_HOST:MQTT_PORT`. It's sent only to that broker, never to one the registry names elsewhere. Compose sets `gateway` and `MQTT_GATEWAY_PASSWORD`. |
 | `NODE_RED_PASSWORD` | not set | When set, logins are required for the editor, `/register` and the API, as user `NODE_RED_USER` (default `admin`). Leave it unset locally; the tests expect no login. |
 
 To deploy to edge devices with qbee.io, see [deploy/README.md](deploy/README.md).
@@ -91,13 +92,6 @@ This runs every unit and end-to-end test against the running stack, in about 3 m
 
 ## Security
 
-This is a proof-of-concept setup:
-- The Node-RED editor and registry API have no login.
-- The broker allows anonymous clients.
-- Both are published on `127.0.0.1` only, so other machines can't reach them.
-
-Before exposing either:
-- **Node-RED:** set `NODE_RED_PASSWORD`, which turns on logins for the editor, `/register` and the API.
-- **The broker:** add authentication to its configuration.
-
-The qbee deployment does the first. The broker there still allows anonymous clients, but only on the device itself.
+- **The broker requires a login.** [docker/broker-start.sh](docker/broker-start.sh) creates two users when the broker starts: `gateway`, which may publish and subscribe under `iot/`, and `viewer`, which may only read `iot/#`. Their passwords are `MQTT_GATEWAY_PASSWORD` and `MQTT_VIEWER_PASSWORD`; locally they default to `local-gateway` and `local-viewer` (override them in `.env`). Without a gateway password, the broker refuses to start.
+- **The Node-RED editor and registry API** have no login locally. Set `NODE_RED_PASSWORD` to turn logins on; the qbee deployment always does.
+- **Both are published on `127.0.0.1` only,** so other machines can't reach them. On staging devices they can also be published on the device's ZeroTier IP; see [deploy/README.md](deploy/README.md#zerotier-on-staging-devices).
