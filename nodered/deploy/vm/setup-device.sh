@@ -12,6 +12,20 @@ if [ -n "${1:-}" ] && [ -f "$1" ]; then
     rm -f "$1"
 fi
 
+# Small machines (such as Oracle's or Google's free 1 GB VMs) get a 2 GB swap file, so one gateway, its broker and the
+# simulator fit without the kernel killing a container.
+mem_mb=$(awk '/^MemTotal:/ {print int($2 / 1024)}' /proc/meminfo)
+if [ "$mem_mb" -lt 2048 ] && ! swapon --show=NAME --noheadings | grep -q .; then
+    echo "Only ${mem_mb} MB of RAM and no swap: adding a 2 GB swap file at /swapfile..."
+    fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048
+    chmod 600 /swapfile
+    mkswap /swapfile > /dev/null
+    swapon /swapfile
+    grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    echo "vm.swappiness = 10" > /etc/sysctl.d/90-swappiness.conf
+    sysctl -q -p /etc/sysctl.d/90-swappiness.conf
+fi
+
 if docker compose version > /dev/null 2>&1; then
     echo "Docker with Compose is already installed."
 else
@@ -54,6 +68,11 @@ fi
 # Lets Docker publish ports on the ZeroTier IP even when ZeroTier connects after Docker starts the gateway at boot.
 echo "net.ipv4.ip_nonlocal_bind = 1" > /etc/sysctl.d/90-zerotier-bind.conf
 sysctl -q -p /etc/sysctl.d/90-zerotier-bind.conf
+# A fresh install's service takes a few seconds to start; until then the CLI fails with "missing port".
+for _ in $(seq 30); do
+    "$zt" info > /dev/null 2>&1 && break
+    sleep 1
+done
 "$zt" join "$network"
 echo "ZeroTier node $("$zt" info | awk '{print $3}') asked to join $network."
 echo "Approve it in ZeroTier Central (my.zerotier.com), note its IP, and set the qbee parameter ZEROTIER_IP to it."
