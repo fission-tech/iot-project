@@ -3,6 +3,8 @@
 # Unlike ../compose.yaml, nothing is built here: the images come from GHCR, and the certificate is a volume.
 # qbee-deploy.js --instances runs this file several times on one device, as projects iot-nodered, iot-nodered-2, ...
 # Each has its own broker, state and ports; GATEWAY_INSTANCE appends its number to GATEWAY_ID.
+# REMOTE_BIND is a second address the ports are published on: the device's ZeroTier IP with qbee-deploy.js --zerotier
+# (staging only), otherwise 127.0.0.2, which like 127.0.0.1 is reachable from nowhere but the device itself.
 services:
   # Creates the broker certificate on the first start, then exits. Later starts keep it.
   certs:
@@ -16,9 +18,14 @@ services:
     depends_on:
       certs:
         condition: service_completed_successfully
-    # Only this device can connect; reach it remotely through qbee-connect or qbee-cli.
+    # Only this device (and, on staging, ZeroTier members) can connect; reach it remotely through qbee-cli.
     ports:
       - "127.0.0.1:{{MQTT_PORT}}:8883"
+      - "{{REMOTE_BIND}}:{{MQTT_PORT}}:8883"
+    # Logins: the gateway publishes as "gateway"; people and dashboards read as "viewer". See docker/broker-start.sh.
+    environment:
+      MQTT_GATEWAY_PASSWORD: "{{MQTT_GATEWAY_PASSWORD}}"
+      MQTT_VIEWER_PASSWORD: "{{MQTT_VIEWER_PASSWORD}}"
     volumes:
       - certs:/mosquitto/certs:ro
       - mosquitto-data:/mosquitto/data
@@ -35,8 +42,11 @@ services:
       GATEWAY_ID: "{{GATEWAY_ID}}"
       GATEWAY_INSTANCE: "{{GATEWAY_INSTANCE}}"
       NODE_RED_PASSWORD: "{{NODE_RED_PASSWORD}}"
+      MQTT_USERNAME: gateway
+      MQTT_PASSWORD: "{{MQTT_GATEWAY_PASSWORD}}"
     ports:
       - "127.0.0.1:{{NODE_RED_PORT}}:1880"
+      - "{{REMOTE_BIND}}:{{NODE_RED_PORT}}:1880"
     volumes:
       - nodered-state:/data/state
       - certs:/certs:ro

@@ -5,6 +5,8 @@
 //        [--dry-run]
 //   --instances N  runs N independent gateways on each device (projects iot-nodered, iot-nodered-2, ...)
 //   --simulator    also runs a simulated pump and tank next to each gateway, for devices without real ones
+//   --zerotier     also publishes Node-RED and the broker on the device's ZeroTier IP (qbee parameter ZEROTIER_IP).
+//                  Staging only: production devices stay reachable through qbee tunnels alone.
 // Environment: QBEE_EMAIL, QBEE_PASSWORD, GHCR_USERNAME, GHCR_TOKEN (read:packages), QBEE_API (default below)
 const fs = require("fs");
 const path = require("path");
@@ -31,13 +33,19 @@ function projectName(instance) {
 // Template parameters of gateway n. GATEWAY_ID and the password point to qbee parameters, so each device sets its own
 // ID and the password stays a qbee secret. Gateway 1 also takes its ports from qbee; the others get fixed ports
 // above them, because a qbee parameter cannot be added to.
-function instanceParameters(tag, instance, simulator) {
+// Without --zerotier the second published address is another loopback one, so nothing is reachable from outside.
+const NO_REMOTE_BIND = "127.0.0.2";
+
+function instanceParameters(tag, instance, simulator, zerotier = false) {
     const port = (parameter, base) => instance === 1 ? "$(" + parameter + ")" : String(base + instance - 1);
     return [
         { key: "IMAGE_TAG", value: tag },
         { key: "GATEWAY_ID", value: "$(GATEWAY_ID)" },
         { key: "GATEWAY_INSTANCE", value: String(instance) },
         { key: "NODE_RED_PASSWORD", value: "$(NODE_RED_PASSWORD)" },
+        { key: "MQTT_GATEWAY_PASSWORD", value: "$(MQTT_GATEWAY_PASSWORD)" },
+        { key: "MQTT_VIEWER_PASSWORD", value: "$(MQTT_VIEWER_PASSWORD)" },
+        { key: "REMOTE_BIND", value: zerotier ? "$(ZEROTIER_IP)" : NO_REMOTE_BIND },
         { key: "NODE_RED_PORT", value: port("NODE_RED_PORT", NODE_RED_PORT) },
         { key: "MQTT_PORT", value: port("MQTT_PORT", MQTT_PORT) },
         { key: "SIM_REPLICAS", value: simulator ? "1" : "0" }
@@ -45,11 +53,11 @@ function instanceParameters(tag, instance, simulator) {
 }
 
 // One commit replaces the group's whole Docker Compose configuration: one project per gateway, all from the same file.
-function buildCommit({ group, tag, registryUser, registryToken, instances = 1, simulator = false }) {
+function buildCommit({ group, tag, registryUser, registryToken, instances = 1, simulator = false, zerotier = false }) {
     const items = Array.from({ length: instances }, (_, i) => ({
         name: projectName(i + 1),
         file: FILE_DIR + composeFileName(tag),
-        parameters: instanceParameters(tag, i + 1, simulator),
+        parameters: instanceParameters(tag, i + 1, simulator, zerotier),
         // The certs and sim-seed containers exit when done; that is no reason for qbee to restart the project.
         // Containers that crash are restarted by Docker (restart: unless-stopped).
         skip_restart: true
@@ -136,7 +144,7 @@ function client(base, token) {
 async function deploy(options, log = console.log) {
     const { api, group, tag, email, password, registryUser, registryToken, waitMinutes, pollSeconds, dryRun } = options;
     const instances = options.instances || 1;
-    const commit = buildCommit({ group, tag, registryUser, registryToken, instances, simulator: options.simulator });
+    const commit = buildCommit({ group, tag, registryUser, registryToken, instances, simulator: options.simulator, zerotier: options.zerotier });
     if (dryRun) {
         log(JSON.stringify({ ...commit, changes: commit.changes.map(redact) }, null, 2));
         return { devices: [] };
@@ -210,6 +218,7 @@ function parseArgs(argv) {
         const name = argv[i].replace(/^--/, "");
         if (name === "dry-run") args.dryRun = true;
         else if (name === "simulator") args.simulator = true;
+        else if (name === "zerotier") args.zerotier = true;
         else args[name] = argv[++i];
     }
     return args;
@@ -230,6 +239,7 @@ if (require.main === module) {
         pollSeconds: Number(args["poll-seconds"] || 30),
         instances: Number(args.instances || 1),
         simulator: Boolean(args.simulator),
+        zerotier: Boolean(args.zerotier),
         dryRun: Boolean(args.dryRun)
     };
     const missing = ["group", "tag"].filter(k => !options[k]);
@@ -241,7 +251,7 @@ if (require.main === module) {
     }
     if (missing.length) {
         console.error("Missing: " + missing.join(", ") + "\nUsage: node qbee-deploy.js --group <id> --tag <image tag> " +
-            "[--instances 1] [--simulator] [--wait-minutes 20] [--dry-run]");
+            "[--instances 1] [--simulator] [--zerotier] [--wait-minutes 20] [--dry-run]");
         process.exit(2);
     }
     if (!/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/.test(options.tag)) {

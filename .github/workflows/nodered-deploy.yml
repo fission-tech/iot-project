@@ -2,8 +2,9 @@
 #   called by Node-RED CI after it publishes the images of a push to feature/node-red -> staging
 #   run by hand with a published tag                                                 -> staging (how to roll back)
 # For now only staging is deployed; canary and production are commented out below until their groups exist.
-# Each GitHub environment has its own variables QBEE_GROUP_ID and QBEE_INSTANCES (gateways per device, default 1) and
-# secrets QBEE_EMAIL, QBEE_PASSWORD, GHCR_USERNAME and GHCR_TOKEN. See nodered/deploy/README.md.
+# Each GitHub environment has its own variables QBEE_GROUP_ID, QBEE_INSTANCES (gateways per device, default 1) and,
+# on staging only, QBEE_ZEROTIER ("true" publishes the gateways on each device's ZeroTier IP), and secrets QBEE_EMAIL,
+# QBEE_PASSWORD, GHCR_USERNAME and GHCR_TOKEN. See nodered/deploy/README.md.
 name: Node-RED deploy
 
 on:
@@ -79,13 +80,15 @@ jobs:
           TAG: ${{ needs.plan.outputs.tag }}
           GROUP: ${{ vars.QBEE_GROUP_ID }}
           INSTANCES: ${{ vars.QBEE_INSTANCES || '1' }}
+          ZEROTIER: ${{ vars.QBEE_ZEROTIER }}
           QBEE_EMAIL: ${{ secrets.QBEE_EMAIL }}
           QBEE_PASSWORD: ${{ secrets.QBEE_PASSWORD }}
           GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
-        run: >-
-          node nodered/deploy/qbee-deploy.js --group "$GROUP" --tag "$TAG"
-          --instances "$INSTANCES" --simulator --wait-minutes 20
+        run: |
+          args=(--group "$GROUP" --tag "$TAG" --instances "$INSTANCES" --simulator --wait-minutes 20)
+          if [ "$ZEROTIER" = "true" ]; then args+=(--zerotier); fi
+          node nodered/deploy/qbee-deploy.js "${args[@]}"
 
   # Canary and production: turned off until their qbee groups and GitHub environments exist. To turn them on,
   # uncomment both jobs, add the environments with required reviewers, and decide what triggers them (for example

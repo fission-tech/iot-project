@@ -16,7 +16,8 @@ test("the commit sets the image tag, versioned file and registry login, and leav
     const params = Object.fromEntries(project.parameters.map(p => [p.key, p.value]));
     assert.deepEqual(params, {
         IMAGE_TAG: "sha-abc1234", GATEWAY_ID: "$(GATEWAY_ID)", GATEWAY_INSTANCE: "1", NODE_RED_PASSWORD: "$(NODE_RED_PASSWORD)",
-        NODE_RED_PORT: "$(NODE_RED_PORT)", MQTT_PORT: "$(MQTT_PORT)", SIM_REPLICAS: "0"
+        MQTT_GATEWAY_PASSWORD: "$(MQTT_GATEWAY_PASSWORD)", MQTT_VIEWER_PASSWORD: "$(MQTT_VIEWER_PASSWORD)",
+        REMOTE_BIND: "127.0.0.2", NODE_RED_PORT: "$(NODE_RED_PORT)", MQTT_PORT: "$(MQTT_PORT)", SIM_REPLICAS: "0"
     });
     assert.equal(project.skip_restart, true, "exited one-shot containers must not restart the project");
     assert.equal(change.config.clean, true, "projects no longer listed are removed");
@@ -32,6 +33,20 @@ test("several gateways per device get their own project, number and ports; the s
     assert.deepEqual(params.map(p => p.NODE_RED_PORT), ["$(NODE_RED_PORT)", "1881", "1882"]);
     assert.deepEqual(params.map(p => p.MQTT_PORT), ["$(MQTT_PORT)", "8884", "8885"]);
     assert.ok(params.every(p => p.GATEWAY_ID === "$(GATEWAY_ID)" && p.SIM_REPLICAS === "1"));
+});
+
+test("only --zerotier publishes the ports on the device's ZeroTier IP; otherwise a second loopback address", () => {
+    const bind = options => buildCommit({ group: "g", tag: "t", instances: 2, ...options }).changes[0].config.items
+        .map(item => item.parameters.find(p => p.key === "REMOTE_BIND").value);
+    assert.deepEqual(bind({}), ["127.0.0.2", "127.0.0.2"]);
+    assert.deepEqual(bind({ zerotier: true }), ["$(ZEROTIER_IP)", "$(ZEROTIER_IP)"]);
+});
+
+test("the Compose file publishes every port on 127.0.0.1 and REMOTE_BIND only, never on all addresses", () => {
+    const compose = require("fs").readFileSync(require.resolve("../../deploy/compose.qbee.yaml"), "utf8");
+    const published = [...compose.matchAll(/^\s+- "([^"]+:\d*\{?\{?\w*\}?\}?:\d+)"$/gm)].map(m => m[1]);
+    assert.ok(published.length >= 4, "found the published ports");
+    for (const entry of published) assert.match(entry, /^(127\.0\.0\.1|\{\{REMOTE_BIND\}\}):/, entry);
 });
 
 test("every template parameter in the Compose file is set by the commit", () => {

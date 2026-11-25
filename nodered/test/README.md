@@ -2,7 +2,7 @@
 
 Two suites check `nodered/flows.json`:
 
-- **Unit** (62 tests, about a second): runs the flow's Function node code straight from `flows.json`, with fake flow/context stores and a controllable clock, and checks the qbee deploy script against a fake qbee API and the staging simulator against a fake registry API. It needs no Node-RED, broker, Modbus device or qbee account.
+- **Unit** (64 tests, about a second): runs the flow's Function node code straight from `flows.json`, with fake flow/context stores and a controllable clock, and checks the qbee deploy script against a fake qbee API and the staging simulator against a fake registry API. It needs no Node-RED, broker, Modbus device or qbee account.
 - **End to end** (22 tests, about 2–3 minutes): drives a running Node-RED through its registry API, serves Modbus from built-in test servers, and reads the results from the MQTT broker. The reliability tests point the gateway at an in-process test broker (`aedes`) that they stop and start.
 
 ## Run

@@ -73,6 +73,8 @@ Instead of hardware, staging can use Multipass VMs on a Windows PC. Each is a he
    - runs [setup-device.sh](vm/setup-device.sh) inside it, which installs Docker with Compose from Ubuntu's packages and then the qbee agent with the key.
 
    Running it again skips whatever is already done. Without a key, it installs only Docker.
+
+   To also put a VM on ZeroTier, add `-ZeroTierNetwork <network ID>`. See [ZeroTier on staging devices](#zerotier-on-staging-devices).
 4. **Finish in qbee.** Approve each VM under **Pending Devices**, move it into the staging group, and set its `GATEWAY_ID`.
 
 Other commands:
@@ -90,9 +92,12 @@ Other commands:
    | `NODE_RED_PORT` | Each group, or a parent group | `1880` |
    | `MQTT_PORT` | Each group, or a parent group | `8883` |
    | `NODE_RED_PASSWORD` | A **secret** on each group | A strong password. The user name is `admin`. |
+   | `MQTT_GATEWAY_PASSWORD` | A **secret** on each group | A strong password. The gateway logs in to its broker as `gateway` with it. Without it, the broker refuses to start. |
+   | `MQTT_VIEWER_PASSWORD` | A **secret** on each group | A different strong password. People and dashboards (MQTTX) log in as `viewer`, which can only read `iot/#`. |
+   | `ZEROTIER_IP` | **Each device**, staging only | The device's IP on the ZeroTier network, e.g. `10.147.17.5`. Only used with `QBEE_ZEROTIER`. |
    | `GATEWAY_ID` | **Each device** | `site-a-gw-01`. Must be unique; the gateway's MQTT status topic is `iot/gateway/<id>/status`. |
 
-   Two notes on the password:
+   Two notes on the passwords:
    - **Avoid `$` in the password.** Docker Compose treats `$` as the start of a variable; if you need one, write it as `$$`.
    - **Root on the device can see it.** It's passed to the container as an environment variable, so `docker inspect` shows it.
 4. **Pipeline account.** Create a qbee user for the pipeline, without two-factor sign-in. The API's two-factor challenge step isn't supported by the script. It needs permission to manage configuration and files and to read devices. To trigger check-ins, it also needs `remote-access:connect`.
@@ -103,6 +108,7 @@ Other commands:
 2. **Settings for each environment.** Give each environment:
    - **Variable `QBEE_GROUP_ID`:** that environment's qbee group ID.
    - **Variable `QBEE_INSTANCES` (optional):** gateways per device, from 1 to 10. Without it, 1.
+   - **Variable `QBEE_ZEROTIER` (optional, staging only):** `true` also publishes each gateway on its device's `ZEROTIER_IP`. Set it only once every device in the group has that parameter, or the deployment fails.
    - **Secrets `QBEE_EMAIL` and `QBEE_PASSWORD`:** the pipeline account.
    - **Secrets `GHCR_USERNAME` and `GHCR_TOKEN`:** a GitHub user and a token with only `read:packages`. Devices use it to download the images. The workflow's own `GITHUB_TOKEN` can't be used, because it expires after the run.
 3. **Package access.** The first CI run on `feature/node-red` creates the GHCR packages; `iot-nodered-sim` arrives with the first run after it was added. They're private by default. If the token's user can't read them, grant it access under each package's settings.
@@ -121,6 +127,7 @@ QBEE_EMAIL=... QBEE_PASSWORD=... GHCR_USERNAME=... GHCR_TOKEN=... \
 Options:
 - `--instances N` runs N gateways on each device. The default is 1.
 - `--simulator` runs the simulated plant next to each gateway. Staging always uses it; leave it off for real devices.
+- `--zerotier` also publishes Node-RED and the broker on each device's `ZEROTIER_IP`. Staging only.
 - `--dry-run` prints the commit, with the registry password hidden, and changes nothing.
 - `--wait-minutes` sets how long to wait for devices. The default is 20.
 
@@ -134,12 +141,48 @@ qbee-cli connect -d <qbee-device-id> -t 1880:localhost:1880,8883:localhost:8883
 
 Then:
 - **Node-RED:** open `http://localhost:1880` and log in as `admin`.
-- **MQTT:** connect MQTTX to `mqtts://localhost:8883`.
+- **MQTT:** connect MQTTX to `mqtts://localhost:8883` as `viewer`, with the group's `MQTT_VIEWER_PASSWORD`. The broker refuses connections without a login, and `viewer` can only read.
 - **The device's own certificate,** to trust it in MQTTX: on the device, run `docker compose -p iot-nodered cp certs:/certs/broker.crt .`. Or use the qbee terminal.
 
 The qbee-connect desktop app does the same thing with a graphical interface. Use a **custom** port.
 
 Gateway 2 and later use their own ports (see below), so tunnel those instead, for example `-t 1881:localhost:1881` for gateway 2.
+
+## ZeroTier on staging devices
+
+On staging, a ZeroTier network can replace the tunnels: computers on the network reach each gateway at its device's ZeroTier IP, and staging gateways can poll Modbus devices (such as ModSim) on other members' computers. **Production devices don't use it.** They stay reachable through qbee tunnels only.
+
+Without `--zerotier`, each port is published on `127.0.0.1` and `127.0.0.2`, both reachable only from the device itself. With it, the second address is the device's ZeroTier IP. Nothing is ever published on all addresses, and a unit test checks that.
+
+**Setting up:**
+1. **Install ZeroTier on the device** and join the network. For a new VM, `.
+ew-staging-devices.ps1 -ZeroTierNetwork <network ID>`. For an existing one, run [setup-device.sh](vm/setup-device.sh) on it with `ZEROTIER_NETWORK=<network ID>`. It also sets `net.ipv4.ip_nonlocal_bind=1`, so Docker can publish on the ZeroTier IP even when ZeroTier connects after Docker at boot.
+2. **Approve it in ZeroTier Central** (my.zerotier.com, **Members**). Keep the network **Private**, so every member needs approval. Note the device's IP.
+3. **In qbee,** give the device the parameter `ZEROTIER_IP` with that IP.
+4. **In GitHub,** set the staging variable `QBEE_ZEROTIER` to `true`, and push or rerun the deployment.
+5. **On your computer,** install ZeroTier, join the same network and get approved. Then open `http://<ZEROTIER_IP>:1880`, and point MQTTX at `mqtts://<ZEROTIER_IP>:8883` as `viewer`. The certificate is for `localhost`, so leave **SSL Secure** off for this address.
+
+**Limiting what members can reach.** Approval decides who joins; flow rules decide what they can open. Paste these into the network's **Flow Rules** in ZeroTier Central:
+
+```
+# IPv4, IPv6 and ARP only.
+drop not ethertype ipv4 and not ethertype arp and not ethertype ipv6;
+# New TCP connections only to gateways (Node-RED 1880-1889, MQTT 8883-8892) and Modbus TCP (502).
+accept ipprotocol tcp and dport 1880-1889;
+accept ipprotocol tcp and dport 8883-8892;
+accept ipprotocol tcp and dport 502;
+drop chr tcp_syn and not chr tcp_ack;
+accept;
+```
+
+Test them after saving: a gateway page and MQTTX should still connect, and SSH to a member over ZeroTier should not.
+
+**What's exposed and how it's protected:**
+- **Node-RED** (editor, `/register`, the API): the `admin` login, `NODE_RED_PASSWORD`. It's the same password on every gateway in the group, so treat every ZeroTier member as someone who could change any staging gateway.
+- **The broker:** logins only. `viewer` reads `iot/#`; only `gateway` can publish.
+- **The ZeroTier traffic** is encrypted end to end, so the plain HTTP to Node-RED doesn't cross the internet readable.
+
+To take a device off ZeroTier, set `QBEE_ZEROTIER` to `false` (or delete it) and deploy, then remove the member in ZeroTier Central.
 
 ## Several gateways per device, and the simulated plant
 
@@ -165,7 +208,7 @@ A VM with 1 GB of memory is enough for several gateways, so a few VMs can stand 
 Readings then appear on the gateway's broker as `iot/<gateway ID>-pump/telemetry` and `iot/<gateway ID>-tank/telemetry`. To watch them, open the device's terminal in qbee and run:
 
 ```
-docker exec iot-nodered-mosquitto-1 sh -c 'mosquitto_sub -h localhost -p 8883 --cafile /mosquitto/certs/broker.crt -t "iot/#" -v'
+docker exec iot-nodered-mosquitto-1 sh -c 'mosquitto_sub -h localhost -p 8883 --cafile /mosquitto/certs/broker.crt -u viewer -P "$MQTT_VIEWER_PASSWORD" -t "iot/#" -v'
 ```
 
 For gateway 2, use `iot-nodered-2-mosquitto-1`. Without `--simulator`, both containers are defined but not started.

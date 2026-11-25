@@ -11,6 +11,7 @@ Without a key, only Docker is installed. Running it again on an existing VM skip
 .\new-staging-devices.ps1                      # qbee-staging-1
 .\new-staging-devices.ps1 -Count 3             # qbee-staging-1, -2 and -3
 .\new-staging-devices.ps1 -Name lab-gw-01      # any names
+.\new-staging-devices.ps1 -ZeroTierNetwork 8d1c312afa58e883   # also joins that ZeroTier network
 #>
 param(
     [int]$Count = 1,
@@ -19,7 +20,9 @@ param(
     [string]$Image = "24.04",
     [int]$Cpus = 2,
     [string]$Memory = "1G",
-    [string]$Disk = "10G"
+    [string]$Disk = "10G",
+    [ValidatePattern('^([0-9a-f]{16})?$')]
+    [string]$ZeroTierNetwork = ""
 )
 $ErrorActionPreference = "Stop"
 
@@ -65,7 +68,7 @@ try {
         }
 
         Write-Host "== $vm`: running setup (installing Docker takes a few minutes)"
-        multipass exec $vm -- sudo bash /tmp/setup-device.sh @keyArg
+        multipass exec $vm -- sudo env "ZEROTIER_NETWORK=$ZeroTierNetwork" bash /tmp/setup-device.sh @keyArg
         if ($LASTEXITCODE -ne 0) { throw "Setup failed on $vm" }
     }
 } finally {

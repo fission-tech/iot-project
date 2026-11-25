@@ -2,6 +2,8 @@
 # Turns a fresh Ubuntu VM into a qbee staging device: Docker Engine with Compose, then the qbee agent.
 # Run inside the VM as root: setup-device.sh [file holding the qbee bootstrap key]. The key file is deleted once
 # read. Without a key, only Docker is installed. Safe to run again: finished steps are skipped.
+# With ZEROTIER_NETWORK set (a 16-character network ID), it also installs ZeroTier and joins that network; approve the
+# device in ZeroTier Central, then give it the qbee parameter ZEROTIER_IP. Staging devices only.
 set -euo pipefail
 
 key=""
@@ -30,3 +32,28 @@ else
     wget -qO - https://setup.qbee.io | bash -s -- --bootstrap-key "$key"
     echo "qbee agent: $(systemctl is-active qbee-agent 2>/dev/null || echo installed)"
 fi
+
+network="${ZEROTIER_NETWORK:-}"
+if [ -z "$network" ]; then
+    echo "No ZEROTIER_NETWORK given: ZeroTier is not installed."
+    exit 0
+fi
+if ! [[ "$network" =~ ^[0-9a-f]{16}$ ]]; then
+    echo "ZEROTIER_NETWORK must be a 16-character network ID, such as 8d1c312afa58e883." >&2
+    exit 1
+fi
+# From ZeroTier's own snap: the apt repository that install.zerotier.com sets up fails on Ubuntu 24.04 (its signing
+# key isn't the one the script installs).
+zt=/snap/bin/zerotier-cli
+if [ -x "$zt" ]; then
+    echo "ZeroTier is already installed."
+else
+    echo "Installing ZeroTier..."
+    snap install zerotier
+fi
+# Lets Docker publish ports on the ZeroTier IP even when ZeroTier connects after Docker starts the gateway at boot.
+echo "net.ipv4.ip_nonlocal_bind = 1" > /etc/sysctl.d/90-zerotier-bind.conf
+sysctl -q -p /etc/sysctl.d/90-zerotier-bind.conf
+"$zt" join "$network"
+echo "ZeroTier node $("$zt" info | awk '{print $3}') asked to join $network."
+echo "Approve it in ZeroTier Central (my.zerotier.com), note its IP, and set the qbee parameter ZEROTIER_IP to it."

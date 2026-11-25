@@ -53,6 +53,7 @@ jobs:
         run: |
           sed -e 's/{{IMAGE_TAG}}/ci/' -e 's/{{GATEWAY_ID}}/ci-gw/' -e 's/{{GATEWAY_INSTANCE}}/2/' -e 's/{{NODE_RED_PASSWORD}}/ci/' \
               -e 's/{{NODE_RED_PORT}}/1880/' -e 's/{{MQTT_PORT}}/8883/' -e 's/{{SIM_REPLICAS}}/1/' \
+              -e 's/{{MQTT_GATEWAY_PASSWORD}}/ci-gw/' -e 's/{{MQTT_VIEWER_PASSWORD}}/ci-view/' -e 's/{{REMOTE_BIND}}/127.0.0.2/' \
               deploy/compose.qbee.yaml > "$RUNNER_TEMP/compose.qbee.yaml"
           if grep -n '{{' "$RUNNER_TEMP/compose.qbee.yaml"; then echo "Template parameter left unset" >&2; exit 1; fi
           docker compose -f "$RUNNER_TEMP/compose.qbee.yaml" config --quiet
