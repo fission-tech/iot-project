@@ -94,7 +94,7 @@ The integration test creates an isolated Compose project without published host 
 
 ## Grafana and history
 
-The Grafana branch builds/tests/publishes the eight image targets but does not auto-deploy to the existing demo group. After checks and qbee setup, explicitly run `.NET gateway deploy` with this branch's exact commit and matching published tag. Keep the same `iot-dotnet` project and existing volumes. The previous branch/worktree remains the gateway-only demo.
+The Grafana branch builds/tests/publishes the eight image targets and then deploys to the configured .NET staging group. Configure the qbee parameters below before pushing deployment changes. The rollout uses the same commit's immutable image tag, `iot-dotnet` project and existing volumes. The previous branch/worktree remains available as the gateway-only demo source.
 
 Three continuous services are added: `historian` (Sparkplug history and generated dashboards), `timescaledb` (storage), and `grafana` (visualization). With the optional simulator there are seven running containers plus the successful one-shot `certs` container.
 

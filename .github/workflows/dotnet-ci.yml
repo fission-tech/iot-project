@@ -119,7 +119,7 @@ jobs:
           exit-code: '1'
   deploy-staging:
     needs: publish
-    if: github.event_name == 'push' && github.ref != 'refs/heads/feature/dotnet-qbee-grafana' && vars.DOTNET_QBEE_GROUP_ID != ''
+    if: github.event_name == 'push' && vars.DOTNET_QBEE_GROUP_ID != ''
     uses: ./.github/workflows/dotnet-deploy.yml
     with:
       ref: ${{ github.sha }}
