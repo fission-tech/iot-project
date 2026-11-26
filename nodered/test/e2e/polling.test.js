@@ -112,7 +112,7 @@ test("a unit that rejects the address answered: failing with bad values, never o
     await api("DELETE", "/e2e-u5");
 });
 
-test("a silent unit times out, skips the rest of its poll, and does not slow another endpoint", { timeout: 30000 }, async () => {
+test("a silent unit times out, skips the rest of its poll, and does not slow another endpoint", { timeout: 40000 }, async () => {
     const before = simB.requests.length;
     await api("POST", "", device("u7", 15021, 7, [m("Level", "holding", 0, "int16"), m("Count", "input", 0, "uint16")]));
     const status = await offlineAfterFailures("u7");
@@ -121,10 +121,12 @@ test("a silent unit times out, skips the rest of its poll, and does not slow ano
     const sent = simB.requests.slice(before);
     assert.ok(sent.length >= 3);
     assert.ok(sent.every(request => request.fc === 3), "the input frame is never sent after the holding frame times out");
+    // 10 readings expected at u3's 1 s interval. At least 7 tolerates a 2-3 s stall of a busy CI runner, while a u3
+    // held up behind u7's 2 s timeouts would manage only about 3-5.
     const window = Date.now();
-    await sleep(5000);
+    await sleep(10000);
     const u3 = bus.forDevice("u3", window);
-    assert.ok(u3.length >= 4, `u3 published ${u3.length} times in 5 s at a 1 s interval`);
+    assert.ok(u3.length >= 7, `u3 published ${u3.length} times in 10 s at a 1 s interval`);
     assert.ok(u3.every(msg => polling(msg.payload)));
 });
 
