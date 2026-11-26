@@ -1,4 +1,7 @@
 # qbee substitutes these parameters per edge computer. See README.md before deploying.
+# DOTNET_REMOTE_BIND is the device's ZeroTier IP when deployed with --zerotier, otherwise 127.0.0.2 (loopback, never
+# reachable from outside). Only the registry is published there: the broker allows anonymous clients, so it stays on
+# 127.0.0.1 and is reached through a qbee or SSH tunnel.
 services:
   certs:
     image: ghcr.io/fission-tech/iot-dotnet-certs:{{IMAGE_TAG}}
@@ -26,7 +29,7 @@ services:
       Management__PublicCertificatePath: /certs/broker.crt
       Gateway__Id: "{{DOTNET_GATEWAY_ID}}"
       GatewayStatus__Path: /gateway-state/status.json
-    ports: ["127.0.0.1:{{DOTNET_API_PORT}}:5300"]
+    ports: ["127.0.0.1:{{DOTNET_API_PORT}}:5300", "{{DOTNET_REMOTE_BIND}}:{{DOTNET_API_PORT}}:5300"]
     volumes: [configuration-state:/state, gateway-state:/gateway-state:ro, broker-public:/certs:ro]
     restart: unless-stopped
   gateway:

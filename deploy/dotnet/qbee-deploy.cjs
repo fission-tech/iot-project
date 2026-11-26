@@ -5,13 +5,16 @@ const PROJECT = 'iot-dotnet';
 const DIRECTORY = '/iot-dotnet/';
 const IMAGE_PREFIX = 'ghcr.io/fission-tech/iot-dotnet-';
 const parameters = ['DOTNET_GATEWAY_ID', 'DOTNET_SPARKPLUG_GROUP', 'DOTNET_MANAGEMENT_PASSWORD', 'DOTNET_API_PORT', 'DOTNET_MQTT_PORT'];
-function buildCommit({ group, tag, registryUser, registryToken, simulator = false }) {
+// Without --zerotier the registry's second published address is loopback, so nothing is exposed beyond 127.0.0.1.
+const NO_REMOTE_BIND = '127.0.0.2';
+function buildCommit({ group, tag, registryUser, registryToken, simulator = false, zerotier = false }) {
   return {
     message: `Deploy .NET gateway ${tag}`,
     changes: [{ node_id: group, formtype: 'docker_compose', config: {
       enabled: true, version: 'v1', clean: false,
       items: [{ name: PROJECT, file: `${DIRECTORY}compose-${tag}.yaml`, skip_restart: true,
-        parameters: [{ key: 'IMAGE_TAG', value: tag }, ...parameters.map(key => ({ key, value: `$(${key})` })), { key: 'SIM_REPLICAS', value: simulator ? '1' : '0' }] }],
+        parameters: [{ key: 'IMAGE_TAG', value: tag }, ...parameters.map(key => ({ key, value: `$(${key})` })),
+          { key: 'DOTNET_REMOTE_BIND', value: zerotier ? '$(ZEROTIER_IP)' : NO_REMOTE_BIND }, { key: 'SIM_REPLICAS', value: simulator ? '1' : '0' }] }],
       registry_auths: [{ server: 'ghcr.io', username: registryUser, password: registryToken }]
     } }]
   };
@@ -109,7 +112,7 @@ async function deploy(options, log = console.log) {
 if (require.main === module) {
   const args = process.argv.slice(2), value = name => args[args.indexOf(name) + 1];
   const options = { group: args.includes('--group') ? value('--group') : undefined, tag: args.includes('--tag') ? value('--tag') : undefined,
-    simulator: args.includes('--simulator'), dryRun: args.includes('--dry-run'),
+    simulator: args.includes('--simulator'), zerotier: args.includes('--zerotier'), dryRun: args.includes('--dry-run'),
     email: process.env.DOTNET_QBEE_EMAIL, password: process.env.DOTNET_QBEE_PASSWORD,
     registryUser: process.env.DOTNET_GHCR_USERNAME, registryToken: process.env.DOTNET_GHCR_TOKEN };
   deploy(options).catch(error => { console.error(error.message); process.exitCode = 1; });

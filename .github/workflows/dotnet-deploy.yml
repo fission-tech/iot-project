@@ -55,9 +55,11 @@ jobs:
           GROUP: ${{ vars.DOTNET_QBEE_GROUP_ID }}
           TAG: ${{ needs.plan.outputs.tag }}
           SIMULATOR: ${{ inputs.simulator }}
+          ZEROTIER: ${{ vars.DOTNET_QBEE_ZEROTIER }}
         shell: bash
         run: |
           if [ -z "$GROUP" ]; then echo "Set DOTNET_QBEE_GROUP_ID to the dedicated .NET group." >&2; exit 1; fi
           args=(--group "$GROUP" --tag "$TAG")
           if [ "$SIMULATOR" = "true" ]; then args+=(--simulator); fi
+          if [ "$ZEROTIER" = "true" ]; then args+=(--zerotier); fi
           node deploy/dotnet/qbee-deploy.cjs "${args[@]}"

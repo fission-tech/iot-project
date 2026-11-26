@@ -18,6 +18,7 @@ The continuous services are `configuration` (registry API and `/register` page),
 | `DOTNET_MANAGEMENT_PASSWORD` | Your chosen password; see escaping notes below | Secret parameter; group or device |
 | `DOTNET_API_PORT` | `5300` | Group; select an unused VM port |
 | `DOTNET_MQTT_PORT` | `8883` | Group; select an unused VM port |
+| `ZEROTIER_IP` | `10.93.19.239` | Device; only with ZeroTier access (see below) |
 
 Use letters, digits, `_` and `-` for IDs. The application imposes no password length or character policy. Like the Node-RED deployment, qbee substitutes the password into Compose environment variables. Avoid `$`, or enter `$$` for a literal dollar sign; quotes and backslashes must also be escaped for the double-quoted YAML value. This raw templating does not automatically preserve arbitrary characters. Root/Docker administrators can see environment values through `docker inspect`. Even an empty password still requires the `admin` username when deployment authentication is enabled. The password is for the registry's `admin` user, not a qbee or GitHub password. Do not commit it. Gateway identity and Sparkplug group form MQTT topics: changing identity changes the published source, so keep them stable.
 
@@ -26,6 +27,7 @@ Use letters, digits, `_` and `-` for IDs. The application imposes no password le
 The workflows use separate .NET names so existing Node-RED variables do not accidentally target its group.
 
 - Repository variable: `DOTNET_QBEE_GROUP_ID` = the dedicated .NET group's ID. Leave it unset until the VM and parameters are ready; CI can still build/test/publish, and deployment is skipped.
+- Optional repository variable: `DOTNET_QBEE_ZEROTIER` = `true` publishes each device's registry on its ZeroTier IP as well (see "ZeroTier access" below). Leave it unset to keep everything on loopback.
 - Repository secrets: `ILYAAN_QBEE_EMAIL`, `ILYAAN_QBEE_PASSWORD`, `ILYAAN_GHCR_USERNAME`, `ILYAAN_GHCR_TOKEN`. The workflow maps these existing credentials to the deployment script's `DOTNET_` environment variables; no duplicate secrets are needed. The qbee account must have access to the dedicated .NET group, and the GHCR token owner must be able to read the .NET packages.
 - The GHCR token is a classic PAT with `read:packages`, belonging to a user who can read the private .NET packages. Authorize organization SSO if required. It is used by the edge computer to pull images. Publishing uses the workflow's `GITHUB_TOKEN` with `packages:write`.
 - Organization policy must allow this repository to create packages. If a package with one of these names already exists, its administrator must grant this repository Write access under **Manage Actions access**. Adding a PAT alone does not change package permissions.
@@ -51,6 +53,16 @@ Use qbee-connect or qbee-cli authenticated to an account with remote-access perm
 Replace `DEVICE_ID` without angle brackets. Sign in as `admin` with the management password. Add a TCP interface using an address reachable **from the VM/container**, then register its devices, unit IDs and metrics. One interface can serve several unit IDs. Addresses are zero-based. Existing API validation and metric identities are retained. RTU records remain in the registry, but RTU polling is not implemented.
 
 The page provides device/interface/broker configuration and basic device polling status. A worker snapshot older than 15 seconds shows status unavailable. Detailed MQTT/outbox diagnostics stay in the console/status file. Docker health checks use the worker heartbeat and registry readiness independently of the page; a broker or field-device outage does not make an otherwise functioning buffering gateway unhealthy.
+
+### ZeroTier access (staging)
+
+With `DOTNET_QBEE_ZEROTIER=true`, the registry is also published on the device's ZeroTier IP, so members of the ZeroTier network open `http://<ZEROTIER_IP>:<DOTNET_API_PORT>/register` with no tunnel. The registry still requires the `admin` login.
+
+1. Install ZeroTier on the VM and join the network. The Node-RED `nodered/deploy/vm/setup-device.sh` does this with `ZEROTIER_NETWORK=<id>`, and also sets `net.ipv4.ip_nonlocal_bind=1` so Docker can publish on the ZeroTier IP even if ZeroTier connects after Docker at boot. Set that sysctl yourself on VMs prepared another way, or the stack can fail to start after a reboot.
+2. Authorize the VM in ZeroTier Central and set its address as the device parameter `ZEROTIER_IP`. A wrong address is not reported: the port is bound to an address the VM doesn't have and is simply unreachable.
+3. Set the repository variable `DOTNET_QBEE_ZEROTIER` to `true` and deploy.
+
+Only the registry is exposed. The broker allows anonymous clients, so it stays on `127.0.0.1` and MQTTX still uses a tunnel. Don't publish it on ZeroTier until it requires logins: anyone on the network could otherwise read and publish.
 
 For MQTTX, create another tunnel to VM `localhost:8883`. Download the **local broker certificate** from the registry page, select `mqtts://127.0.0.1:<mapped-port>`, enable SSL Secure, choose CA or Self signed certificates and select `broker.crt` in CA File. This uses the same self-signed broker certificate approach as Node-RED, with no separate CA. The certificate covers `mosquitto`, `localhost` and `127.0.0.1`. Subscribe to `spBv1.0/<group>/#`; payloads are Sparkplug B protobuf. This PoC broker uses anonymous MQTT inside the private Compose network and loopback tunnel; TLS supplies server verification, not client authentication. Access to the tunnel is controlled by qbee users/roles.
 
