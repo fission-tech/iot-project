@@ -24,12 +24,26 @@ internal static class GatewayBrokerChecks
         try
         {
             CheckProfiles(directory);
+            CheckLogin(directory);
             CheckSelector(directory);
             await CheckCertificatesAsync(directory);
             await CheckMissingBrokerAsync(directory);
             Console.WriteLine("PASS: Gateway broker settings: appsettings seed, registry offer/validation, trial window, rollback with rejection, alternation while the broker is down, fresh trial after a change, last-good persistence and corrupt-file fallback, pinned file certificates, cached URL certificates, mismatch refusal, and device updates when the broker is missing.");
         }
         finally { Directory.Delete(directory, recursive: true); }
+    }
+
+    // The broker login goes only to the device's own broker, never to registry settings that point elsewhere.
+    private static void CheckLogin(string directory)
+    {
+        var settings = Settings(directory);
+        var own = new BrokerProfile("local", "10.0.0.5", 1883, false, null, null, 20, 5, 1, 8);
+        Check(!MqttConnection.SendsLogin(settings, own), "no username means no login is sent");
+        settings.Username = "gateway"; settings.Password = "secret";
+        Check(MqttConnection.SendsLogin(settings, own), "the device's own broker gets the login");
+        Check(MqttConnection.SendsLogin(settings, own with { Id = "renamed" }), "the same host and port get the login whatever the broker ID");
+        Check(!MqttConnection.SendsLogin(settings, own with { Host = "broker.example.com" }), "another host must not get the login");
+        Check(!MqttConnection.SendsLogin(settings, own with { Port = 8883 }), "another port must not get the login");
     }
 
     private static MqttSettings Settings(string directory) => new()

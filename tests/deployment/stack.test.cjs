@@ -10,7 +10,9 @@ fs.mkdirSync(directory, { recursive: true });
 const compose = path.join(directory, project + '.yaml');
 let password = process.env.EDGE_TEST_PASSWORD ?? 'ci-env-password-123';
 const platform = process.env.EDGE_TEST_PLATFORM || 'linux/amd64';
-const params = { IMAGE_TAG: process.env.EDGE_IMAGE_TAG || 'local', DOTNET_GATEWAY_ID: 'ci-edge-01', DOTNET_SPARKPLUG_GROUP: 'ci-plant', DOTNET_MANAGEMENT_PASSWORD: password, DOTNET_API_PORT: '5300', DOTNET_MQTT_PORT: '8883', SIM_REPLICAS: '1' };
+const params = { IMAGE_TAG: process.env.EDGE_IMAGE_TAG || 'local', DOTNET_GATEWAY_ID: 'ci-edge-01', DOTNET_SPARKPLUG_GROUP: 'ci-plant', DOTNET_MANAGEMENT_PASSWORD: password, DOTNET_API_PORT: '5300', DOTNET_MQTT_PORT: '8883',
+  DOTNET_MQTT_GATEWAY_PASSWORD: 'ci-gateway-mqtt', DOTNET_MQTT_VIEWER_PASSWORD: 'ci-viewer-mqtt', DOTNET_REMOTE_BIND: '127.0.0.2', SIM_REPLICAS: '1' };
+const viewer = ['-u', 'viewer', '-P', params.DOTNET_MQTT_VIEWER_PASSWORD];
 let template = fs.readFileSync(path.join(root, 'deploy/dotnet/compose.qbee.yaml'), 'utf8');
 // Tests communicate inside Docker. No existing host port or application is touched.
 template = template.replace(/^\s*ports:.*\r?\n/gm, '\n').replaceAll('ghcr.io/fission-tech/', '');
@@ -52,7 +54,17 @@ test('containerized edge stack: TLS, API, polling, outage buffering and persiste
     assert.match(curl('/register.js', { json: false }), /metricPayload/);
     const certificate = curl('/broker-certificate', { json: false });
     assert.match(certificate, /BEGIN CERTIFICATE/); assert.ok(!certificate.includes('PRIVATE KEY'));
-    assert.match(dc('exec', '-T', 'mosquitto', 'mosquitto_sub', '-h', 'localhost', '-p', '8883', '--cafile', '/mosquitto/public/broker.crt', '-t', 'spBv1.0/ci-plant/DDATA/#', '-C', '1', '-W', '20', '-F', '%t'), /DDATA\/ci-edge-01/);
+    const tls = ['-h', 'localhost', '-p', '8883', '--cafile', '/mosquitto/public/broker.crt'];
+    assert.match(dc('exec', '-T', 'mosquitto', 'mosquitto_sub', ...tls, ...viewer, '-t', 'spBv1.0/ci-plant/DDATA/#', '-C', '1', '-W', '20', '-F', '%t'), /DDATA\/ci-edge-01/);
+    // Logins: anonymous clients are refused, and the viewer may read but not publish.
+    assert.throws(() => dc('exec', '-T', 'mosquitto', 'mosquitto_sub', ...tls, '-t', 'spBv1.0/#', '-C', '1', '-W', '5'));
+    const probe = 'spBv1.0/ci-plant/NCMD/viewer-probe';
+    dc('exec', '-d', 'mosquitto', 'sh', '-c', `mosquitto_sub ${tls.join(' ')} -u gateway -P ${params.DOTNET_MQTT_GATEWAY_PASSWORD} -t ${probe} -C 1 -W 6 > /tmp/probe 2>&1`);
+    await delay(1000);
+    dc('exec', '-T', 'mosquitto', 'mosquitto_pub', ...tls, ...viewer, '-t', probe, '-m', 'should-be-dropped');
+    await delay(6500);
+    assert.doesNotMatch(dc('exec', '-T', 'mosquitto', 'cat', '/tmp/probe'), /should-be-dropped/, 'the viewer must not be able to publish');
+    console.log('PASS: Broker logins: anonymous refused, viewer reads Sparkplug data but cannot publish.');
     // Check the Node TLS verification path used by Electron MQTT clients as well as the .NET publisher.
     assert.equal(docker('run', '--rm', '--network', project + '_default', '--mount',
       `type=volume,source=${project}_broker-public,target=/certs,readonly`, 'node:22-alpine', 'node', '-e',

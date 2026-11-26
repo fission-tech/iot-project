@@ -4,8 +4,9 @@ const path = require('node:path');
 const PROJECT = 'iot-dotnet';
 const DIRECTORY = '/iot-dotnet/';
 const IMAGE_PREFIX = 'ghcr.io/fission-tech/iot-dotnet-';
-const parameters = ['DOTNET_GATEWAY_ID', 'DOTNET_SPARKPLUG_GROUP', 'DOTNET_MANAGEMENT_PASSWORD', 'DOTNET_API_PORT', 'DOTNET_MQTT_PORT'];
-// Without --zerotier the registry's second published address is loopback, so nothing is exposed beyond 127.0.0.1.
+const parameters = ['DOTNET_GATEWAY_ID', 'DOTNET_SPARKPLUG_GROUP', 'DOTNET_MANAGEMENT_PASSWORD', 'DOTNET_API_PORT', 'DOTNET_MQTT_PORT',
+  'DOTNET_MQTT_GATEWAY_PASSWORD', 'DOTNET_MQTT_VIEWER_PASSWORD'];
+// Without --zerotier the second published address is loopback, so nothing is exposed beyond 127.0.0.1.
 const NO_REMOTE_BIND = '127.0.0.2';
 function buildCommit({ group, tag, registryUser, registryToken, simulator = false, zerotier = false }) {
   return {

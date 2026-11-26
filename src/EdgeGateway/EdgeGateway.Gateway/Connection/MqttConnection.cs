@@ -108,6 +108,8 @@ public sealed class MqttConnection : IDisposable
             .WithWillPayload(SparkplugPayloads.NodeDeath(BirthDeathSequence).ToByteArray())
             .WithWillQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
             .WithWillRetain(false);
+        if (SendsLogin(_settings, broker))
+            builder.WithCredentials(_settings.Username, _settings.Password);
         _trustedCertificate?.Dispose();
         _trustedCertificate = null;
         CertificateExpires = null;
@@ -122,6 +124,12 @@ public sealed class MqttConnection : IDisposable
         }
         return builder.Build();
     }
+
+    // Only the device's own broker gets the login: registry settings pointing anywhere else must not receive it.
+    public static bool SendsLogin(MqttSettings settings, BrokerProfile broker) =>
+        settings.Username.Length > 0
+        && string.Equals(broker.Host, settings.Host, StringComparison.OrdinalIgnoreCase)
+        && broker.Port == settings.Port;
 
     private static TaskCompletionSource NewDisconnectSignal() =>
         new(TaskCreationOptions.RunContinuationsAsynchronously);

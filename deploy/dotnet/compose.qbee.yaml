@@ -1,7 +1,7 @@
 # qbee substitutes these parameters per edge computer. See README.md before deploying.
 # DOTNET_REMOTE_BIND is the device's ZeroTier IP when deployed with --zerotier, otherwise 127.0.0.2 (loopback, never
-# reachable from outside). Only the registry is published there: the broker allows anonymous clients, so it stays on
-# 127.0.0.1 and is reached through a qbee or SSH tunnel.
+# reachable from outside). The registry and the broker are published there. The broker requires logins: "gateway"
+# publishes, "viewer" (MQTTX) may only read spBv1.0/#.
 services:
   certs:
     image: ghcr.io/fission-tech/iot-dotnet-certs:{{IMAGE_TAG}}
@@ -11,7 +11,10 @@ services:
     image: ghcr.io/fission-tech/iot-dotnet-broker:{{IMAGE_TAG}}
     depends_on:
       certs: {condition: service_completed_successfully}
-    ports: ["127.0.0.1:{{DOTNET_MQTT_PORT}}:8883"]
+    ports: ["127.0.0.1:{{DOTNET_MQTT_PORT}}:8883", "{{DOTNET_REMOTE_BIND}}:{{DOTNET_MQTT_PORT}}:8883"]
+    environment:
+      MQTT_GATEWAY_PASSWORD: "{{DOTNET_MQTT_GATEWAY_PASSWORD}}"
+      MQTT_VIEWER_PASSWORD: "{{DOTNET_MQTT_VIEWER_PASSWORD}}"
     volumes: [broker-private:/mosquitto/certs:ro, broker-public:/mosquitto/public:ro, mqtt-data:/mosquitto/data]
     restart: unless-stopped
   configuration:
@@ -42,6 +45,8 @@ services:
       Mqtt__Host: mosquitto
       Mqtt__BrokerCertificatePath: /certs/broker.crt
       Mqtt__ClientId: "{{DOTNET_GATEWAY_ID}}"
+      Mqtt__Username: gateway
+      Mqtt__Password: "{{DOTNET_MQTT_GATEWAY_PASSWORD}}"
       Mqtt__StateDirectory: /state/mqtt
       Sparkplug__GroupId: "{{DOTNET_SPARKPLUG_GROUP}}"
       Sparkplug__EdgeNodeId: "{{DOTNET_GATEWAY_ID}}"

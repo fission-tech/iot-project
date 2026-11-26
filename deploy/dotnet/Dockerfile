@@ -32,7 +32,13 @@ HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=3 CMD curl 
 
 FROM eclipse-mosquitto:2.1.2-alpine AS broker
 COPY deploy/dotnet/mosquitto.conf /mosquitto/config/mosquitto.conf
+COPY deploy/dotnet/broker-start.sh /broker-start.sh
+# Strips Windows line endings, which would break the script, and gives the mosquitto user a place for its logins.
+RUN sed -i 's/\r$//' /broker-start.sh && mkdir -p /mosquitto/auth && chown mosquitto:mosquitto /mosquitto/auth && chmod 700 /mosquitto/auth
+ENV MQTT_GATEWAY_PASSWORD="" MQTT_VIEWER_PASSWORD=""
 USER mosquitto
+ENTRYPOINT []
+CMD ["sh", "/broker-start.sh"]
 
 FROM alpine:3.22 AS certs
 RUN apk add --no-cache openssl

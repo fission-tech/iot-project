@@ -18,13 +18,19 @@ test('qbee template covers all parameters, isolates .NET project and does not de
   assert.equal(item.pre_condition, undefined);
   assert.doesNotMatch(template, /PasswordFile|MANAGEMENT_PASSWORD_FILE|management-password/);
 });
-test('only --zerotier publishes the registry on the device ZeroTier IP; the anonymous broker stays on loopback', () => {
+test('only --zerotier publishes the registry and the logged-in broker on the device ZeroTier IP', () => {
   const bind = options => buildCommit({ group: 'g', tag: 'sha-abc', ...options }).changes[0].config.items[0].parameters.find(p => p.key === 'DOTNET_REMOTE_BIND').value;
   assert.equal(bind({}), '127.0.0.2');
   assert.equal(bind({ zerotier: true }), '$(ZEROTIER_IP)');
   const template = fs.readFileSync(path.join(__dirname, '../../deploy/dotnet/compose.qbee.yaml'), 'utf8');
   const published = [...template.matchAll(/"([^"\s]+):\{\{(\w+)\}\}:(\d+)"/g)].map(([, host, port]) => `${host}:${port}`);
-  assert.deepEqual(published.sort(), ['127.0.0.1:DOTNET_API_PORT', '127.0.0.1:DOTNET_MQTT_PORT', '{{DOTNET_REMOTE_BIND}}:DOTNET_API_PORT'].sort());
+  assert.deepEqual(published.sort(), ['127.0.0.1:DOTNET_API_PORT', '127.0.0.1:DOTNET_MQTT_PORT',
+    '{{DOTNET_REMOTE_BIND}}:DOTNET_API_PORT', '{{DOTNET_REMOTE_BIND}}:DOTNET_MQTT_PORT'].sort());
+  // The broker leaves the device only with logins: anonymous clients are refused and the gateway signs in.
+  const conf = fs.readFileSync(path.join(__dirname, '../../deploy/dotnet/mosquitto.conf'), 'utf8');
+  assert.match(conf, /^allow_anonymous false$/m);
+  assert.match(template, /MQTT_GATEWAY_PASSWORD: "\{\{DOTNET_MQTT_GATEWAY_PASSWORD\}\}"/);
+  assert.match(template, /Mqtt__Password: "\{\{DOTNET_MQTT_GATEWAY_PASSWORD\}\}"/);
 });
 test('all .NET services must run the requested version; worker must be healthy', () => {
   const items = ['gateway', 'configuration', 'broker', 'simulator'].map(service => ({ image: `ghcr.io/fission-tech/iot-dotnet-${service}:sha-abc`, status: 'Up 1 minute (healthy)' }));
